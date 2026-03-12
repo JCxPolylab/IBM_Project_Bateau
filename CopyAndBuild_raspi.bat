@@ -4,12 +4,27 @@ setlocal EnableExtensions EnableDelayedExpansion
 REM ======= CONFIG =======
 set "PROJECT_ROOT=%~dp0"
 set "LIST_FILE=%PROJECT_ROOT%folders_to_copy.txt"
+set "CONFIG_FILE=%PROJECT_ROOT%devConfig.txt"
 
-set "RASPI_USER=jerrycrozet"
-set "RASPI_HOST=raspberrypi"
+REM ======= CHECKS =======
+if not exist "%CONFIG_FILE%" (
+  echo [ERROR] Fichier config introuvable: "%CONFIG_FILE%"
+  pause
+  exit /b 1
+)
 
-REM Je te conseille un chemin absolu plutot que ~
-set "RASPI_DEST=/home/jerrycrozet/camera_project/venv/code/IBM_Bateau"
+set /p "CONFIG_MODE="<"%CONFIG_FILE%"
+
+if /i "%CONFIG_MODE%"=="EPF" (
+    set "RASPI_USER=ibm_bateau"
+    set "RASPI_HOST=10.224.133.212"
+    set "RASPI_DEST=/home/ibm_bateau/code/jerryCamera"
+) else (
+    echo Configuration inconnue ou autre valeur
+    set "RASPI_USER=jerrycrozet"
+    set "RASPI_HOST=raspberrypi"
+    set "RASPI_DEST=/home/jerrycrozet/camera_project/venv/code/IBM_Bateau"
+)
 
 REM ======= CHECKS =======
 if not exist "%LIST_FILE%" (

@@ -4,12 +4,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 rem =======================
 rem  CONFIG A ADAPTER
 rem =======================
-set "PI_USER=jerrycrozet"
-set "PI_HOST=raspberrypi"
-set "PI_PORT=22"
-
-rem Chemin du projet SUR la Raspberry Pi (dossier qui contient le CMakeLists.txt)
-set "REMOTE_DIR=~/camera_project/venv/code/IBM_Bateau"
+set "CONFIG_FILE=%PROJECT_ROOT%devConfig.txt"
 
 rem Options de build
 set "BUILD_TYPE=Release"
@@ -22,6 +17,29 @@ where ssh >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] ssh introuvable. Active "OpenSSH Client" sur Windows.
   exit /b 1
+)
+
+REM ======= CHECKS =======
+if not exist "%CONFIG_FILE%" (
+  echo [ERROR] Fichier config introuvable: "%CONFIG_FILE%"
+  pause
+  exit /b 1
+)
+
+set /p "CONFIG_MODE="<"%CONFIG_FILE%"
+
+if /i "%CONFIG_MODE%"=="EPF" (
+    echo Configuration EPF
+    set "REMOTE_DIR=~/home/ibm_bateau/code/jerryCamera"
+    set "PI_USER=ibm_bateau"
+    set "PI_HOST=10.224.133.212"
+    set "PI_PORT=22"
+) else (
+    echo Configuration inconnue ou autre valeur
+    set "REMOTE_DIR=~/camera_project/venv/code/IBM_Bateau"
+    set "PI_USER=jerrycrozet"
+    set "PI_HOST=raspberrypi"
+    set "PI_PORT=22"
 )
 
 echo.
