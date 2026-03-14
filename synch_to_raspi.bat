@@ -26,7 +26,7 @@ set /p "CONFIG_MODE="<"%CONFIG_FILE%"
 if /i "%CONFIG_MODE%"=="EPF" (
     echo Configuration EPF
     set "RASPI_USER=ibm_bateau"
-    set "RASPI_HOST=10.224.133.212"
+    set "RASPI_HOST=raspiEPF"
     set "RASPI_DEST=/home/ibm_bateau/code/jerryCamera"
 ) else (
     echo Configuration inconnue ou autre valeur
@@ -34,10 +34,6 @@ if /i "%CONFIG_MODE%"=="EPF" (
     set "RASPI_HOST=raspberrypi"
     set "RASPI_DEST=/home/jerrycrozet/camera_project/venv/code/IBM_Bateau"
 )
-
-REM config RASPI Jerry
-
-REM set "RASPI_DEST=/home/jerrycrozet/camera_project/venv/code/IBM_Bateau"
 
 echo.
 echo === Lecture de la liste: "%LIST_FILE%" ===

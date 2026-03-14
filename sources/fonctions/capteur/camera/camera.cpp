@@ -55,7 +55,17 @@ Camera::~Camera() {
     cv::destroyAllWindows();
 }
 
-bool Camera::isOpen() const { return cap_.isOpened(); }
+bool Camera::isOpen() const { return cap_.isOpened();}
+
+bool Camera::close() 
+{
+    if (isOpen()) 
+    {
+        cap_.release();
+        return true;
+    }
+    return false;
+}
 
 bool Camera::startCapture(double fps) {
     if (!isOpen() || running_)
@@ -83,6 +93,9 @@ void Camera::captureLoop_()
     auto new_time = std::chrono::steady_clock::now();
     auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(new_time - old_time).count();
 	long long fps_tick = (int)(1000 / this->fps_);
+
+	std::cout << "Image shown status : " << isImageShown_ << std::endl;
+	std::cout << "save record status : " << recording_ << std::endl;
 
     while (running_)
     {
@@ -139,24 +152,37 @@ bool Camera::getLatestFrame(cv::Mat& out) {
     return true;
 }
 
-bool Camera::startRecording(const std::string& filename, double fps) {
+bool Camera::startRecording(const std::string& filename, double fps, const std::string& fourcc)
+{
     if (!isOpen()) return false;
+
+    // Il faut déjà avoir une frame donc startCapture AVANT startRecording
     cv::Mat f;
     cap_ >> f;
-    if (f.empty()) return false;
+    if (f.empty()) {
+        std::cerr << "startRecording: frame vide (camera pas prête)\n";
+        return false;
+    }
 
-    // MP4V est souvent lisible partout (Windows/VLC/etc.)
-    bool ok = writer_.open(
-        filename,
-        cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
-        fps,
-        cv::Size(f.cols, f.rows),
-        true
-    );
+    // fourcc doit faire 4 chars
+    std::string cc = fourcc;
+    if (cc.size() != 4) {
+        std::cerr << "startRecording: FOURCC invalide '" << cc << "' (attendu 4 chars)\n";
+        return false;
+    }
+
+    int four = cv::VideoWriter::fourcc(cc[0], cc[1], cc[2], cc[3]);
+
+    std::cout << "Starting recording to " << filename
+        << " at " << fps << " FPS with codec " << cc << "\n";
+
+    bool ok = writer_.open(filename, four, fps, cv::Size(f.cols, f.rows), true);
+
     if (!ok) {
         std::cerr << "VideoWriter non ouvert (codec/format)\n";
         return false;
     }
+
     recording_ = true;
     return true;
 }
@@ -927,7 +953,7 @@ void Camera::runMeasureTool(CATJ_camera::Camera& cam , MeasureState& st)
             }
         }
 
-        cv::imshow(win, view);
+        if(isImageShown_)   cv::imshow(win, view);
         int key = cv::waitKey(1);
 
         if (key == 27 || key == 'q') break;

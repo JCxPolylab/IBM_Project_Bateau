@@ -60,6 +60,7 @@ namespace CATJ_camera {
         // Capture
         bool startCapture(double fps = 20.0);
         void stopCapture();
+        bool close();
         bool getLatestFrame(cv::Mat& out); // thread-safe
         double computeDistance_mm(double realDiameterMm, double apparentDiameterPx) const;
         bool calibrateCamera(bool savePicCalib, std::vector<cv::Point3f> objTemplate, cv::Mat frame, cv::Mat* out);
@@ -68,7 +69,7 @@ namespace CATJ_camera {
         void runMeasureTool(CATJ_camera::Camera& cam, MeasureState& st);
 
         // Enregistrement
-        bool startRecording(const std::string& filename, double fps = 20.0);
+        bool startRecording(const std::string& filename, double fps, const std::string& fourcc);
         void stopRecording();
         void setShow(bool v) { isImageShown_ = v; }
 
@@ -100,6 +101,7 @@ namespace CATJ_camera {
         std::atomic <int> getKeyPolled() const { return keyPolled_.load(); }
 		int getNeededViews() const { return neededViews_; }
         int getOnnx_InputSize() const { return onnx_inputSize_; }
+		bool getRecording() const { return recording_.load(); }
 
         //seteurs
 		void setTargetColor(BallColor c) { targetColor_ = c; }
@@ -117,6 +119,7 @@ namespace CATJ_camera {
 		void setImg(std::vector<std::vector<cv::Point2f>> img) { imgPts_ = img; }
 		void setNeededViews(int n) { neededViews_ = n; }
         void setOnnx_InputSize(int input) { onnx_inputSize_ = input; }
+		void setRecording(bool v) { recording_ = v; }  
 
     private:
 		void captureLoop_(); //Fonction de capture video exectuer en multithreading

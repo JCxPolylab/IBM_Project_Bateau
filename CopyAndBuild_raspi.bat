@@ -17,13 +17,15 @@ set /p "CONFIG_MODE="<"%CONFIG_FILE%"
 
 if /i "%CONFIG_MODE%"=="EPF" (
     set "RASPI_USER=ibm_bateau"
-    set "RASPI_HOST=10.224.133.212"
+    set "RASPI_HOST=raspiEPF"
     set "RASPI_DEST=/home/ibm_bateau/code/jerryCamera"
+    set "PI_PORT=22"
 ) else (
     echo Configuration inconnue ou autre valeur
     set "RASPI_USER=jerrycrozet"
     set "RASPI_HOST=raspberrypi"
     set "RASPI_DEST=/home/jerrycrozet/camera_project/venv/code/IBM_Bateau"
+    set "PI_PORT=22"
 )
 
 REM ======= CHECKS =======
@@ -54,7 +56,7 @@ if !COUNT! LEQ 0 (
 )
 
 echo.
-echo === Copie vers %RASPI_USER%@%RASPI_HOST%:%RASPI_DEST% ===
+echo === Copie vers %RASPI_USER%@%RASRASPI_HOST%:%RASPI_DEST% ===
 
 REM ======= PASS 2 : COPY =======
 set /a IDX=0
@@ -96,12 +98,6 @@ setlocal EnableExtensions EnableDelayedExpansion
 rem =======================
 rem  CONFIG A ADAPTER
 rem =======================
-set "PI_USER=jerrycrozet"
-set "PI_HOST=raspberrypi"
-set "PI_PORT=22"
-
-rem Chemin du projet SUR la Raspberry Pi (dossier qui contient le CMakeLists.txt)
-set "REMOTE_DIR=~/camera_project/venv/code/IBM_Bateau"
 
 rem Options de build
 set "BUILD_TYPE=Release"
@@ -117,14 +113,16 @@ if errorlevel 1 (
 )
 
 echo.
-echo ===== Remote build on %PI_USER%@%PI_HOST%:%REMOTE_DIR% =====
+echo ===== Remote build on %RASPI_USER%@%RASPI_HOST%:%RASPI_DEST% =====
 echo.
 
 rem =======================
 rem  BUILD REMOTE
 rem =======================
-ssh -p %PI_PORT% %PI_USER%@%PI_HOST% ^
-  "cd %REMOTE_DIR% && rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DUSE_ORT=%USE_ORT% && cmake --build build --parallel"
+ssh -p %PI_PORT% %RASPI_USER%@%RASPI_HOST% ^
+  chmod -R u+rwX /home/ibm_bateau/code/jerryCamera/build
+  ssh -p %PI_PORT% %RASPI_USER%@%RASPI_HOST% ^
+  "cd %RASPI_DEST% && rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DUSE_ORT=%USE_ORT% && cmake --build build --parallel"
 
 if errorlevel 1 (
   echo.

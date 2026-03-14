@@ -30,9 +30,9 @@ set /p "CONFIG_MODE="<"%CONFIG_FILE%"
 
 if /i "%CONFIG_MODE%"=="EPF" (
     echo Configuration EPF
-    set "REMOTE_DIR=~/home/ibm_bateau/code/jerryCamera"
+    set "REMOTE_DIR=/home/ibm_bateau/code/jerryCamera"
     set "PI_USER=ibm_bateau"
-    set "PI_HOST=10.224.133.212"
+    set "PI_HOST=raspiEPF"
     set "PI_PORT=22"
 ) else (
     echo Configuration inconnue ou autre valeur

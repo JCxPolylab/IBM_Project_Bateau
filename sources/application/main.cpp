@@ -1,12 +1,28 @@
 //Execution sur rapsi en remote + récupération érreurs : timeout 10s ./CATJ_ibmRobotProject; echo "exit=$?"
 
 #include "main.h"
+
 #define DIR_NAME "IBM_robot_SimuPC"
+
+// Dir raspi Jerry
+/*
 #define DIR_NAME_LINUX "IBM_Bateau"
+*/
+
+//Dir raspi EPF
+#define DIR_NAME_LINUX "jerryCamera"
+
+
+#ifdef WIN32
+#include <windows.h>
+#endif
 
 //D�claration des variables
 bool flagRecording = false;
 bool showImage = false;
+int vKey = 0;
+std::string imgCodec;
+std::string imgExt;
 
 int main() 
 {
@@ -86,7 +102,9 @@ int main()
     iniFile.get("CAMERA", "square size", fvalA);
 	cam.setSquareSizeCalibration(fvalA);
     iniFile.get("CAMERA", "flag recording", flagRecording);
+	cam.setRecording(flagRecording);
     iniFile.get("CAMERA", "show image", showImage);
+    cam.setShow(showImage);
     iniFile.get("CAMERA", "non maximum suppression threshold", fvalA);
     iniFile.get("CAMERA", "score threshold", fvalB);
 	cam.setThresholds(fvalB, fvalA);
@@ -98,6 +116,9 @@ int main()
 	cam.setHWFocaleMm(fvalA);
     iniFile.get("CAMERA", "nombres de prise pour la calibration", valA);
 	cam.setNeededViews(valA);
+    iniFile.get("CAMERA", "video codec", imgCodec);
+    iniFile.get("CAMERA", "video ext", imgExt);
+
     iniFile.get("IA", "ONNX model path", str);
     std::filesystem::path modelPath = std::filesystem::path(str).is_absolute()
         ? std::filesystem::path(str)
@@ -116,7 +137,7 @@ int main()
             if (showImage)
                 cam.setShow(true);
             if (flagRecording)
-                cam.startRecording("debug.mp4", 20.0);
+                cam.startRecording("debug." + std::string(imgExt), 20.0, imgCodec);
 
             // Chargement du mod�le onnx (traitement IA)
             //cam.loadBallDetectorONNX("ball.onnx", 320);
@@ -214,7 +235,7 @@ int main()
         std::cout << "camera status" << cam.isOpen() << std::endl;
         while (cam.isOpen())
         {
-            std::cout << "Dernière mesure : " << measTools.lastPx << " px, distance estimée : " << measTools.lastDistMm << " mm\n";
+            std::cout << "Dernière mesure : " << measTools.lastPx << " px, distance estimée : " << measTools.lastDistMm << " mm\n";  
         }
         break;
 
@@ -222,11 +243,20 @@ int main()
         std::cout << "Mode DEBUG/capture loop\n";
 
         cam.startCapture(cam.getFps());
-        cam.setShow(true);
+        cam.startRecording("debug." + imgExt, 20.0, imgCodec);
+
+        if (flagRecording)
+
+		std::cout << "Appuyez sur la touche 'q' pour quitter le programme\n" << std::endl;
 
         while (cam.isOpen())
         {
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (cv::pollKey() == 'q')
+            {
+                cam.stopCapture();
+                break;
+            }
         }
 
         break;

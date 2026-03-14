@@ -1,0 +1,3 @@
+/home/jerrycrozet/camera_project/venv/code/IBM_Bateau/build/CMakeFiles/CATJ_ibmRobotProject.dir
+/home/jerrycrozet/camera_project/venv/code/IBM_Bateau/build/CMakeFiles/edit_cache.dir
+/home/jerrycrozet/camera_project/venv/code/IBM_Bateau/build/CMakeFiles/rebuild_cache.dir
