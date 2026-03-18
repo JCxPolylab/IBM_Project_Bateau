@@ -1,48 +1,162 @@
-#ifndef __BLUETOOTH_API__H__
-#define __BLUETOOTH_API__H__
-/*
+#pragma once
+
+#include <cstdint>
+#include <mutex>
 #include <string>
-#include <bluetooth/bluetooth.h>
-#include <bluetooth/rfcomm.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <cstring>
+#include <vector>
+
+namespace CATJ_bluetooth {
+
+    enum class BluetoothMode {
+        Client,
+        Server
+    };
+
+    struct BluetoothConfig {
+        BluetoothMode mode = BluetoothMode::Client;
+
+        // Mode client : adresse MAC distante, ex: "DC:A6:32:11:22:33"
+        std::string remoteAddress;
+
+        // Mode serveur : laisser vide pour écouter sur n'importe quel adaptateur local.
+        // Sinon, adresse MAC locale de l'adaptateur Bluetooth.
+        std::string localAddress;
+
+        // Canal RFCOMM (équivalent d'un "port" Bluetooth Classic)
+        uint8_t channel = 1;
+
+        int readTimeoutMs = 100;
+        int writeTimeoutMs = 100;
+        int connectTimeoutMs = 4000;
+        int listenBacklog = 1;
+    };
+
+    class BluetoothLink {
+    public:
+        struct Packet {
+            uint8_t type = 0;
+            std::vector<uint8_t> payload;
+        };
+
+        BluetoothLink() = default;
+        explicit BluetoothLink(const BluetoothConfig& cfg);
+        ~BluetoothLink();
+
+        BluetoothLink(const BluetoothLink&) = delete;
+        BluetoothLink& operator=(const BluetoothLink&) = delete;
+
+        BluetoothLink(BluetoothLink&& other) noexcept;
+        BluetoothLink& operator=(BluetoothLink&& other) noexcept;
+
+        bool open(const BluetoothConfig& cfg);
+        void close();
+        bool isOpen() const;
+        bool hasPeer() const;
+
+        const BluetoothConfig& config() const { return cfg_; }
+        bool setTimeouts(int readMs, int writeMs);
+
+        // Serveur RFCOMM : accepte un client entrant.
+        // En mode client, retourne simplement isOpen().
+        bool acceptClient(int timeoutMs = -1);
+        void disconnectPeer();
+
+        int writeBytes(const uint8_t* data, size_t size);
+        int writeString(const std::string& s);
+        int readBytes(uint8_t* buffer, size_t maxSize, int timeoutMs = -1);
+        bool readLine(std::string& outLine, char eol = '\n', int timeoutMs = -1, size_t maxLen = 512);
+
+        // Format de trame cohérent avec UART / Wi-Fi :
+        // [0xAA][0x55][TYPE][LEN_L][LEN_H][PAYLOAD...][CHK]
+        // CHK = checksum8(TYPE + LEN_L + LEN_H + PAYLOAD)
+        bool sendPacket(uint8_t type, const std::vector<uint8_t>& payload);
+        bool receivePacket(Packet& packet, int timeoutMs = -1);
+
+        std::string localAddress() const;
+        std::string peerAddress() const;
+
+        static uint8_t checksum8(const uint8_t* data, size_t size);
+
+    private:
+        using socket_handle_t = int;
+        static constexpr socket_handle_t kInvalidSocket = -1;
+
+        BluetoothConfig cfg_{};
+        mutable std::mutex ioMutex_;
+        std::vector<uint8_t> rxBuffer_;
+
+        socket_handle_t socket_ = kInvalidSocket;      // socket principal
+        socket_handle_t peerSocket_ = kInvalidSocket;  // client accepté en mode serveur
+        bool opened_ = false;
+
+        bool openClient_();
+        bool openServer_();
+        void closeSocket_(socket_handle_t& s);
+        socket_handle_t activeSocket_() const;
+        int waitReadable_(socket_handle_t s, int timeoutMs) const;
+        int waitWritable_(socket_handle_t s, int timeoutMs) const;
+        bool setNonBlocking_(socket_handle_t s, bool enabled) const;
+        int readOne_(uint8_t& b, int timeoutMs);
+    };
+
+} // namespace CATJ_bluetooth
+
+
+//exemple client
+/*
+#include "bluetooth.h"
 #include <iostream>
 
-int main(int argc, char** argv) {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <MAC> <commande>\n"
-            << "Ex: " << argv[0] << " AA:BB:CC:DD:EE:FF \"PING\"\n";
-        return 1;
+int main()
+{
+    CATJ_bluetooth::BluetoothConfig cfg;
+    cfg.mode = CATJ_bluetooth::BluetoothMode::Client;
+    cfg.remoteAddress = "DC:A6:32:11:22:33";
+    cfg.channel = 1;
+
+    CATJ_bluetooth::BluetoothLink bt;
+    if (!bt.open(cfg)) {
+        std::cerr << "Impossible d'ouvrir la connexion Bluetooth\n";
+        return -1;
     }
 
-    const char* dest = argv[1];
-    const char* cmd = argv[2];
+    bt.writeString("PING\n");
 
-    int sock = socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
-    if (sock < 0) { perror("socket"); return 1; }
-
-    sockaddr_rc addr{};
-    addr.rc_family = AF_BLUETOOTH;
-    addr.rc_channel = 1;
-    str2ba(dest, &addr.rc_bdaddr);
-
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("connect");
-        close(sock);
-        return 1;
+    std::string line;
+    if (bt.readLine(line)) {
+        std::cout << "Recu: " << line << "\n";
     }
 
-    std::string msg = std::string(cmd) + "\n";
-    write(sock, msg.c_str(), msg.size());
-
-    char buf[1024] = { 0 };
-    int bytes = read(sock, buf, sizeof(buf) - 1);
-    if (bytes > 0) std::cout << "Réponse: " << buf;
-
-    close(sock);
+    bt.sendPacket(0x10, {0x01, 0x02, 0x03});
     return 0;
 }
 */
 
-#endif // !__BLUETOOTH_API__H__
+//exemple serveur
+/*
+#include "bluetooth.h"
+#include <iostream>
+
+int main()
+{
+    CATJ_bluetooth::BluetoothConfig cfg;
+    cfg.mode = CATJ_bluetooth::BluetoothMode::Server;
+    cfg.channel = 1;
+
+    CATJ_bluetooth::BluetoothLink bt;
+    if (!bt.open(cfg)) {
+        std::cerr << "Impossible de lancer le serveur Bluetooth\n";
+        return -1;
+    }
+
+    std::cout << "En attente d'un client...\n";
+    if (!bt.acceptClient(5000)) {
+        std::cerr << "Aucun client connecte\n";
+        return -1;
+    }
+
+    std::cout << "Client: " << bt.peerAddress() << "\n";
+    bt.writeString("HELLO\n");
+    return 0;
+}
+*/

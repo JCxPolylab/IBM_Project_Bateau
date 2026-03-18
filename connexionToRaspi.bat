@@ -23,3 +23,6 @@ if /i "%CONFIG_MODE%"=="EPF" (
 )
 
 ssh %PI_USER%@%PI_HOST% -p %PI_PORT%
+
+
+

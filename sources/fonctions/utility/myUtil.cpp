@@ -91,4 +91,5 @@ namespace CATJ_utility {
 
         return true;
     }
+
 } // namespace CATJ_utility

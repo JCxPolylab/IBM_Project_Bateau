@@ -31,34 +31,65 @@
 //using fs = std::filesystem::path;
 using UINT32 = uint32_t;
 
-namespace CATJ_utility {
+namespace CATJ_utility 
+{
     namespace fs = std::filesystem;
 
-    class iniReader {
-    public:
-        bool load(const std::string& path);  // parse tout le fichier
+    class iniReader 
+    {
+        public:
+            bool load(const std::string& path);  // parse tout le fichier
 
-        bool has(const std::string& section, const std::string& key) const;
+            bool has(const std::string& section, const std::string& key) const;
 
-        // R�cup�re une valeur typ�e. false si introuvable ou conversion impossible.
-        template<typename T>
-        bool get(const std::string& section, const std::string& key, T& out) const;
+            // R�cup�re une valeur typ�e. false si introuvable ou conversion impossible.
+            template<typename T>
+            bool get(const std::string& section, const std::string& key, T& out) const;
 
-        // R�cup�re ou renvoie une valeur par d�faut.
-        template<typename T>
-        T getOr(const std::string& section, const std::string& key, const T& def) const;
+            // R�cup�re ou renvoie une valeur par d�faut.
+            template<typename T>
+            T getOr(const std::string& section, const std::string& key, const T& def) const;
 
-    private:
-        std::unordered_map<std::string, std::unordered_map<std::string, std::string>> data_;
+        private:
+            std::unordered_map<std::string, std::unordered_map<std::string, std::string>> data_;
 
-        static std::string trim_(std::string s);
-        static std::string toLower_(std::string s);
-        static bool parseBool_(const std::string& s, bool& out);
+            static std::string trim_(std::string s);
+            static std::string toLower_(std::string s);
+            static bool parseBool_(const std::string& s, bool& out);
 
-        template<typename T>
-        static bool convert_(const std::string& s, T& out);
+            template<typename T>
+            static bool convert_(const std::string& s, T& out);
 
-        const std::string* findValue_(const std::string& section, const std::string& key) const;
+            const std::string* findValue_(const std::string& section, const std::string& key) const;
+    };
+
+    class MyString : public std::string
+    {
+    public:     
+        using std::string::string;
+
+        MyString& trim()
+        {
+            auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+
+            erase(begin(), std::find_if(begin(), end(), notSpace));
+            erase(std::find_if(rbegin(), rend(), notSpace).base(), end());
+
+            std::replace_if(begin(), end(),
+                [](unsigned char c) { return std::isspace(c); },
+                '_');
+
+            return *this;
+        }
+
+        std::string toStdString() const {return *this;}
+
+        void fromStdString(const std::string& s)
+        {
+			this->clear();
+            this->append(s);
+		}
+
     };
 
     template<typename T>
@@ -228,7 +259,7 @@ namespace CATJ_utility {
 #endif
 
         char buf[22]; // "YYYY-MM-DD HH:MM:SS" = 19 + '\0'
-        std::strftime(buf, sizeof(buf), "%d/%m/%Y - %H:%M:%S", &tm);
+        std::strftime(buf, sizeof(buf), "%d-%m-%Y %H-%M-%S", &tm);
         return std::string(buf);
     }
 

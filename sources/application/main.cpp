@@ -23,6 +23,8 @@ bool showImage = false;
 int vKey = 0;
 std::string imgCodec;
 std::string imgExt;
+CATJ_utility::MyString trimTime;
+std::string recordingPath;
 
 int main() 
 {
@@ -118,6 +120,16 @@ int main()
 	cam.setNeededViews(valA);
     iniFile.get("CAMERA", "video codec", imgCodec);
     iniFile.get("CAMERA", "video ext", imgExt);
+    iniFile.get("CAMERA", "recording file path", str);
+
+    trimTime.fromStdString(CATJ_utility::now_timestamp());
+    trimTime.trim();
+
+    std::filesystem::path recDir = PrjPath.string() + "/" + str;
+    std::filesystem::path recFile = "recording_" + trimTime + "." + imgExt;
+
+    recordingPath = (recDir / recFile).string();
+
 
     iniFile.get("IA", "ONNX model path", str);
     std::filesystem::path modelPath = std::filesystem::path(str).is_absolute()
@@ -133,11 +145,7 @@ int main()
         case CATJ_utility::programme_mode::camera:
             std::cout << "Mode CAMERA\n";
             cam.startCapture(60.0);
-
-            if (showImage)
-                cam.setShow(true);
-            if (flagRecording)
-                cam.startRecording("debug." + std::string(imgExt), 20.0, imgCodec);
+            if (flagRecording)  cam.startRecording(recordingPath, 20.0, imgCodec);
 
             // Chargement du mod�le onnx (traitement IA)
             //cam.loadBallDetectorONNX("ball.onnx", 320);
@@ -158,7 +166,7 @@ int main()
         /*************************** CALIBRATION *********************************/
         case CATJ_utility::programme_mode::calibration:
             cam.startCapture(60.0);
-            cam.setShow(true);
+            cam.startRecording(recordingPath, 20.0, imgCodec);
 
 			std::cout << "Mode CALIBRATION\n";
 
@@ -176,12 +184,12 @@ int main()
                 }
 
                 if (cam.calibrateCamera(true, objTemplate, frame, &calibOut)) {
-                    std::cout << "Calibration r�ussie !\n";
+                    std::cout << "Calibration success !\n";
                     cv::imwrite(PrjPath.string() + "/calibration_result.jpg", calibOut);
                     break;
                 }
                 else {
-                    std::cerr << "Calibration �chou�e.\n";
+                    std::cerr << "Echec calibration.\n";
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -243,7 +251,7 @@ int main()
         std::cout << "Mode DEBUG/capture loop\n";
 
         cam.startCapture(cam.getFps());
-        cam.startRecording("debug." + imgExt, 20.0, imgCodec);
+        cam.startRecording(recordingPath, 20.0, imgCodec);
 
         if (flagRecording)
 
