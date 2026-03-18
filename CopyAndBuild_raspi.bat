@@ -17,7 +17,7 @@ set /p "CONFIG_MODE="<"%CONFIG_FILE%"
 
 if /i "%CONFIG_MODE%"=="EPF" (
     set "RASPI_USER=ibm_bateau"
-    set "RASPI_HOST=raspiEPF"
+    set "RASPI_HOST=10.150.74.211"
     set "RASPI_DEST=/home/ibm_bateau/code/jerryCamera"
     set "PI_PORT=22"
 ) else (

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CATJ Boat - Manual / Auto Dashboard</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <header class="topbar">
+        <div>
+            <h1>CATJ Boat Remote Dashboard</h1>
+            <p>Supervision temps réel, pilotage manuel / auto, overlay des détections et télémétrie live.</p>
+        </div>
+        <div class="topBadges">
+            <span id="wsBadge" class="badge badge-off">WS disconnected</span>
+            <span id="modeBadge" class="badge">MODE --</span>
+            <span id="missionBadge" class="badge">MISSION --</span>
+            <span id="overlayBadge" class="badge">Overlay --</span>
+        </div>
+    </header>
+
+    <main class="dashboard">
+        <section class="panel videoPanel">
+            <div class="panelHead">
+                <h2>Flux vidéo + overlay</h2>
+                <div class="miniActions">
+                    <button id="btnManualMode">Manual</button>
+                    <button id="btnAutoMode">Auto</button>
+                    <button id="btnOverlayOn">Overlay ON</button>
+                    <button id="btnOverlayOff" class="secondary">Overlay OFF</button>
+                </div>
+            </div>
+            <div class="videoWrap">
+                <img id="videoFeed" src="/stream.mjpg" alt="Flux vidéo live" />
+            </div>
+            <div class="videoFooter">
+                <div class="statusRow">
+                    <strong id="statusText">status: --</strong>
+                    <span id="autoState">auto state: --</span>
+                </div>
+                <div class="statusRow muted">
+                    <span id="targetVal">Target: --</span>
+                    <span id="fpsVal">FPS: --</span>
+                    <span id="batteryVal">Battery: --</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel telemetryPanel">
+            <div class="panelHead">
+                <h2>Orientation et télémétrie</h2>
+            </div>
+            <div class="telemetryGrid">
+                <div class="telemetryCard"><span>Heading</span><strong id="headingVal">--</strong></div>
+                <div class="telemetryCard"><span>Mag North</span><strong id="northVal">--</strong></div>
+                <div class="telemetryCard"><span>Roll</span><strong id="rollVal">--</strong></div>
+                <div class="telemetryCard"><span>Pitch</span><strong id="pitchVal">--</strong></div>
+                <div class="telemetryCard"><span>Yaw rate</span><strong id="yawVal">--</strong></div>
+                <div class="telemetryCard"><span>Gyro XYZ</span><strong id="gyroVecVal">--</strong></div>
+            </div>
+            <div class="canvasGrid">
+                <div class="canvasCard">
+                    <h3>Rose des caps</h3>
+                    <canvas id="compassCanvas" width="320" height="320"></canvas>
+                </div>
+                <div class="canvasCard">
+                    <h3>Vue gyroscopes</h3>
+                    <canvas id="gyroCanvas" width="320" height="320"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel controlsPanel">
+            <div class="panelHead">
+                <h2>Commandes robot</h2>
+                <div class="miniActions">
+                    <button id="btnMissionStart">Start mission</button>
+                    <button id="btnMissionStop" class="danger">Stop mission</button>
+                    <button id="btnStopAll" class="danger">All stop</button>
+                </div>
+            </div>
+            <div id="manualLockBanner" class="lockBanner hidden">
+                Les commandes manuelles sont verrouillées en mode AUTO.
+            </div>
+
+            <div class="controlColumns">
+                <div class="controlBlock">
+                    <h3>Hélice gauche</h3>
+                    <input id="leftThruster" type="range" min="-100" max="100" value="0" />
+                    <div class="value" id="leftThrusterValue">0 %</div>
+                </div>
+                <div class="controlBlock">
+                    <h3>Hélice droite</h3>
+                    <input id="rightThruster" type="range" min="-100" max="100" value="0" />
+                    <div class="value" id="rightThrusterValue">0 %</div>
+                </div>
+                <div class="controlBlock">
+                    <h3>Tapis roulant</h3>
+                    <input id="conveyor" type="range" min="-100" max="100" value="0" />
+                    <div class="value" id="conveyorValue">0 %</div>
+                </div>
+                <div class="controlBlock">
+                    <h3>Support caméra</h3>
+                    <div class="cameraPad">
+                        <button data-cam-step data-axis="tilt" data-steps="8">Tilt +</button>
+                        <div class="row">
+                            <button data-cam-step data-axis="pan" data-steps="-8">Pan -</button>
+                            <button id="btnCamCenter">Center</button>
+                            <button data-cam-step data-axis="pan" data-steps="8">Pan +</button>
+                        </div>
+                        <button data-cam-step data-axis="tilt" data-steps="-8">Tilt -</button>
+                    </div>
+                    <div class="miniTelemetry">
+                        <span id="camPanVal">Pan --</span>
+                        <span id="camTiltVal">Tilt --</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="quickButtons">
+                <button id="btnForward">Forward</button>
+                <button id="btnBackward">Backward</button>
+                <button id="btnRotateLeft">Rotate left</button>
+                <button id="btnRotateRight">Rotate right</button>
+            </div>
+
+            <div class="cameraControls">
+                <div class="controlBlock">
+                    <h3>Réglages caméra</h3>
+                    <label>Exposure <input id="expRange" type="range" min="-12" max="12" value="0" /></label>
+                    <label>Brightness <input id="brightRange" type="range" min="0" max="100" value="50" /></label>
+                    <label>Contrast <input id="contrastRange" type="range" min="0" max="100" value="50" /></label>
+                </div>
+                <div class="controlBlock">
+                    <h3>Détections live</h3>
+                    <div id="detectionsBox" class="detectionsBox"></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel logPanel">
+            <div class="panelHead"><h2>Journal</h2></div>
+            <div id="logBox" class="logBox"></div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

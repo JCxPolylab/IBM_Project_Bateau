@@ -24,7 +24,7 @@ if /i "%CONFIG_MODE%"=="EPF" (
     set "fileName=%~nx1"
     set "extension=%~x1"
     set "raspberryHome=/"
-    set ipAddress=raspiEPF
+    set ipAddress=10.150.74.211
     set raspiUsr=ibm_bateau
 ) else (
     echo Configuration inconnue ou autre valeur

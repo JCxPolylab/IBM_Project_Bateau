@@ -17,6 +17,7 @@ cmake --build build -j
 #include "../fonctions/utility/errorManagement.h"
 #include "../fonctions/capteur/camera/camera.h"
 #include "../fonctions/navigation/target.h"
+#include "../fonctions/web/robotOverlay/robot_web_bridge.h"
 #include <iostream>
 #include <ostream>
 #include <fstream>

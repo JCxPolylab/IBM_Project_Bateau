@@ -15,7 +15,7 @@ set /p "CONFIG_MODE="<"%CONFIG_FILE%"
 
 if /i "%CONFIG_MODE%"=="EPF" (
     echo Configuration EPF
-    set "ipAddress=raspiEPF"
+    set "ipAddress=10.150.74.211"
     set "remoteUser=ibm_bateau"
     set "raspberryHome=/home/ibm_bateau/"
 ) else (

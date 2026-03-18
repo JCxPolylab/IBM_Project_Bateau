@@ -13,7 +13,7 @@ set /p "CONFIG_MODE="<"%CONFIG_FILE%"
 if /i "%CONFIG_MODE%"=="EPF" (
     echo Configuration EPF
     set "PI_USER=ibm_bateau"
-    set "PI_HOST=raspiEPF"
+    set "PI_HOST=10.150.74.211"
     set "PI_PORT=22"
 ) else (
     echo Configuration inconnue ou autre valeur

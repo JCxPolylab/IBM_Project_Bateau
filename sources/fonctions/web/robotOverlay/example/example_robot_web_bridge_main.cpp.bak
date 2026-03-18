@@ -1,0 +1,204 @@
+#include "robot_web_bridge.h"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <csignal>
+#include <iomanip>
+#include <iostream>
+#include <thread>
+
+namespace {
+std::atomic<bool> g_running{ true };
+
+void onSignal(int)
+{
+    g_running.store(false);
+}
+
+double nowSeconds()
+{
+    using clock = std::chrono::steady_clock;
+    static const auto t0 = clock::now();
+    const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count();
+    return static_cast<double>(dt) / 1000.0;
+}
+
+cv::Rect makeMovingTarget(double t, int w, int h)
+{
+    const int bw = 120;
+    const int bh = 120;
+    const int cx = w / 2 + static_cast<int>(std::cos(t * 0.90) * (w * 0.22));
+    const int cy = h / 2 + static_cast<int>(std::sin(t * 1.10) * (h * 0.16));
+    return {cx - bw / 2, cy - bh / 2, bw, bh};
+}
+}
+
+int main()
+{
+    std::signal(SIGINT, onSignal);
+#if defined(SIGTERM)
+    std::signal(SIGTERM, onSignal);
+#endif
+
+    CATJ_robot_web::RobotWebBridge bridge;
+
+    CATJ_webui_rt::WebUiRtConfig cfg;
+    cfg.bindAddress = "0.0.0.0";
+    cfg.port = 8080;
+    cfg.documentRoot = "./robot_web_demo";
+    cfg.indexFile = "index.html";
+    cfg.telemetryPeriodMs = 80;
+    cfg.jpegQuality = 80;
+
+    bridge.setControlHandler([](const CATJ_robot_web::ControlEvent& ev) {
+        std::cout << "[CTRL] seq=" << ev.sequence
+                  << " type=" << static_cast<int>(ev.type)
+                  << " accepted=" << (ev.accepted ? "yes" : "no")
+                  << " name=" << ev.name
+                  << " A=" << ev.valueA
+                  << " B=" << ev.valueB
+                  << " from=" << ev.remoteIp << ':' << ev.remotePort
+                  << std::endl;
+    });
+
+    if (!bridge.start(cfg, "./robot_web_demo")) {
+        std::cerr << "Impossible de lancer RobotWebBridge" << std::endl;
+        return -1;
+    }
+
+    std::cout << "Dashboard robot: http://<IP_RASPI>:" << cfg.port << std::endl;
+
+    cv::VideoCapture cap;
+    cap.open(0);
+    if (cap.isOpened()) {
+        cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+        cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+    }
+
+    CATJ_robot_web::RobotTelemetry state;
+    state.overlayEnabled = true;
+    state.remoteControlEnabled = true;
+    state.statusText = "ready";
+    state.autoState = "idle";
+    state.batteryV = 15.8;
+    bridge.updateTelemetry(state);
+
+    auto lastFrameTs = std::chrono::steady_clock::now();
+
+    while (g_running.load()) {
+        const double t = nowSeconds();
+
+        cv::Mat frame;
+        if (cap.isOpened()) {
+            cap >> frame;
+        }
+        if (frame.empty()) {
+            frame = cv::Mat(720, 1280, CV_8UC3, cv::Scalar(23, 29, 39));
+            cv::rectangle(frame, {0, 500}, {1280, 720}, cv::Scalar(52, 92, 36), cv::FILLED);
+            cv::putText(frame,
+                        "CATJ Boat - synthetic debug scene",
+                        {32, 48},
+                        cv::FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        cv::Scalar(240, 240, 240),
+                        2,
+                        cv::LINE_AA);
+            for (int i = 0; i < 8; ++i) {
+                const int x = 60 + i * 150;
+                cv::line(frame, {x, 510}, {x + 60, 720}, cv::Scalar(80, 60, 35), 2, cv::LINE_AA);
+            }
+        }
+
+        state = bridge.telemetry();
+        state.compass.headingDeg = std::fmod(t * 24.0, 360.0);
+        state.compass.magneticNorthDeg = state.compass.headingDeg;
+        state.imu.rollDeg = std::sin(t * 1.70) * 10.0;
+        state.imu.pitchDeg = std::cos(t * 1.15) * 7.0;
+        state.imu.yawDeg = state.compass.headingDeg;
+        state.imu.yawRateDps = std::sin(t * 2.20) * 14.0;
+        state.imu.gyroX_dps = std::sin(t * 1.9) * 12.0;
+        state.imu.gyroY_dps = std::cos(t * 1.3) * 10.0;
+        state.imu.gyroZ_dps = state.imu.yawRateDps;
+        state.batteryV = 15.4 + 0.3 * std::sin(t * 0.15);
+
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFrameTs).count() / 1000.0;
+        lastFrameTs = now;
+        if (dt > 1e-6) state.vision.fps = 1.0 / dt;
+
+        const cv::Rect primaryBox = makeMovingTarget(t, frame.cols, frame.rows);
+        const cv::Rect secondaryBox(frame.cols / 2 + 220 + static_cast<int>(std::sin(t * 0.7) * 60.0),
+                                    frame.rows / 2 - 150,
+                                    90,
+                                    90);
+
+        std::vector<CATJ_robot_web::Detection> detections;
+        detections.push_back({primaryBox, "green_ball", 0.90 + 0.07 * std::sin(t * 1.6), cv::Scalar(20, 220, 20), 1, true});
+        detections.push_back({secondaryBox, "red_ball", 0.55 + 0.20 * (0.5 + 0.5 * std::cos(t * 1.2)), cv::Scalar(20, 20, 240), 2, false});
+        bridge.updateDetections(detections);
+
+        state.vision.target = detections.front().label;
+        state.vision.confidence = detections.front().confidence;
+
+        if (state.mode == CATJ_robot_web::RobotMode::Auto) {
+            state.autoEngaged = true;
+            state.autoState = "tracking target";
+            state.statusText = "auto following primary detection";
+
+            const double boxCx = primaryBox.x + primaryBox.width * 0.5;
+            const double imageCx = frame.cols * 0.5;
+            const double err = (boxCx - imageCx) / std::max(1.0, imageCx);
+            const int turn = std::clamp(static_cast<int>(err * 70.0), -35, 35);
+            const int base = state.missionEnabled ? 46 : 0;
+            state.motors.leftPct = std::clamp(base + turn, -100, 100);
+            state.motors.rightPct = std::clamp(base - turn, -100, 100);
+            state.motors.conveyorPct = state.missionEnabled ? 38 : 0;
+            state.motors.camPanDeg = std::clamp(static_cast<int>(err * 70.0), -85, 85);
+            state.motors.camTiltDeg = std::clamp(static_cast<int>((0.5 - (primaryBox.y + primaryBox.height * 0.5) / frame.rows) * 50.0), -35, 35);
+        } else {
+            state.autoEngaged = false;
+            state.autoState = "manual pilot";
+            if (state.statusText.find("manual") == std::string::npos) {
+                state.statusText = "manual pilot active";
+            }
+        }
+
+        cv::circle(frame,
+                   {primaryBox.x + primaryBox.width / 2, primaryBox.y + primaryBox.height / 2},
+                   20,
+                   cv::Scalar(0, 255, 0),
+                   cv::FILLED,
+                   cv::LINE_AA);
+        cv::circle(frame,
+                   {secondaryBox.x + secondaryBox.width / 2, secondaryBox.y + secondaryBox.height / 2},
+                   16,
+                   cv::Scalar(0, 0, 255),
+                   cv::FILLED,
+                   cv::LINE_AA);
+
+        std::ostringstream diag;
+        diag << std::fixed << std::setprecision(1)
+             << "gyro xyz = ["
+             << state.imu.gyroX_dps << ", "
+             << state.imu.gyroY_dps << ", "
+             << state.imu.gyroZ_dps << "] dps";
+        cv::putText(frame,
+                    diag.str(),
+                    {28, frame.rows - 110},
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.70,
+                    cv::Scalar(220, 220, 230),
+                    2,
+                    cv::LINE_AA);
+
+        bridge.updateTelemetry(state);
+        bridge.updateVideoFrame(frame);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+
+    bridge.stop();
+    return 0;
+}
