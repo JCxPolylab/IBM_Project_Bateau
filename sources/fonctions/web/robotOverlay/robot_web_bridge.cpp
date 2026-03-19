@@ -220,7 +220,8 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         remoteEnabled = telemetry_.remoteControlEnabled;
     }
 
-    if (!remoteEnabled) {
+    if (!remoteEnabled) 
+    {
         out.type = ControlEventType::RawWebCommand;
         out.name = ev.action;
         out.accepted = false;
@@ -228,7 +229,8 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         return;
     }
 
-    if (ev.action == "mode_set") {
+    if (ev.action == "mode_set") 
+    {
         const std::string mode = ev.fields.count("mode") ? trimLowerCopy(ev.fields.at("mode")) : "manual";
         out.type = ControlEventType::SetMode;
         out.name = mode;
