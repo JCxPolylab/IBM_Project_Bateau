@@ -1,0 +1,76 @@
+#include <iostream>
+#include <vector>
+
+#include "../capteur/camera/camera.h"
+#include "ball_logic.h"
+#include "mode_course.h"
+#include "mode_labyrinthe.h"
+#include "motherboard_protocol.h"
+
+int main()
+{
+    // 1) Ouverture de la liaison UART vers la carte mère.
+    CATJ_robot::MotherboardConfig boardCfg;
+    boardCfg.uart.port = "/dev/ttyAMA0";
+    boardCfg.uart.baudrate = 115200;
+
+    CATJ_robot::MotherboardLink board;
+    if (!board.open(boardCfg)) {
+        std::cerr << "Impossible d'ouvrir l'UART carte mère\n";
+        return 1;
+    }
+
+    board.sendMode(CATJ_robot::RobotMode::Course);
+    board.sendObjective(120);
+
+    // 2) Caméra et logique métier balles.
+    CATJ_camera::Camera cam(0, 640, 480);
+    cam.setTargetColor(CATJ_camera::BallColor::Red);
+    cam.setIgnoreColor(CATJ_camera::BallColor::Blue);
+
+    CATJ_robot::BallLogic ballLogic;
+    CATJ_robot::ModeCourse course;
+    CATJ_robot::ModeLabyrinthe laby;
+
+    course.prepare(120);
+    course.start();
+
+    // Exemple de boucle simplifiée.
+    for (;;) {
+        std::vector<CATJ_camera::BallDetection> rawDetections;
+        std::vector<CATJ_robot::RobotBall> robotBalls;
+
+        cv::Mat frame;
+        if (cam.getLatestFrame(frame) && cam.detectBalls(rawDetections)) {
+            robotBalls = ballLogic.convert(cam, rawDetections, frame.cols, frame.rows);
+        }
+
+        // Exemple LiDAR : à remplacer par une vraie lecture sectorielle.
+        CATJ_robot::LidarDirections d;
+        d.frontMm = 900.0f;
+        d.rightMm = 450.0f;
+        d.leftMm  = 800.0f;
+        d.rearMm  = 1200.0f;
+
+        // Choisir le mode voulu.
+        course.update(robotBalls, d.rearMm, board);
+        // laby.update(d, board);
+
+        auto best = ballLogic.bestTarget(robotBalls);
+        if (best) {
+            board.sendTurnDeg(best->angleDeg);
+            board.sendSpeedPct(best->distanceM < 0.7f ? 35 : 55);
+            board.sendMove(CATJ_robot::MoveCommand::Forward);
+        }
+
+        auto status = board.readStatusOnce(5);
+        if (status && status->catchAck == CATJ_robot::CatchAck::Ok) {
+            std::cout << "Catch confirmé par la carte mère\n";
+        }
+
+        // Petite attente de boucle.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    return 0;
+}
