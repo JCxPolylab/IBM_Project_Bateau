@@ -23,7 +23,7 @@ body {
 }
 
 .topbar {
-    width: min(1600px, calc(100% - 28px));
+    width: min(1680px, calc(100% - 28px));
     margin: 18px auto 0;
     display: flex;
     justify-content: space-between;
@@ -48,7 +48,7 @@ body {
 .badge-auto { background: rgba(59,130,246,0.22); color: #dbeafe; }
 
 .dashboard {
-    width: min(1600px, calc(100% - 28px));
+    width: min(1680px, calc(100% - 28px));
     margin: 18px auto 28px;
     display: grid;
     grid-template-columns: 1.35fr 1fr;
@@ -136,7 +136,9 @@ input:disabled {
 }
 .cameraControls, .controlColumns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .telemetryGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 14px; }
+.telemetryGrid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .canvasGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.canvasGrid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 .controlBlock, .telemetryCard, .canvasCard {
     background: rgba(255,255,255,0.03);
@@ -152,7 +154,7 @@ input:disabled {
     color: var(--muted);
 }
 .telemetryCard span { color: var(--muted); display: block; }
-.telemetryCard strong { font-size: 1.35rem; display: block; margin-top: 6px; }
+.telemetryCard strong { font-size: 1.25rem; display: block; margin-top: 6px; }
 .value { margin-top: 8px; color: #bfdbfe; font-weight: 700; }
 
 input[type="range"] { width: 100%; }
@@ -202,7 +204,7 @@ input[type="range"] { width: 100%; }
     border-color: rgba(250, 204, 21, 0.45);
     background: rgba(250, 204, 21, 0.10);
 }
-.detItem strong { display: flex; justify-content: space-between; }
+.detItem strong { display: flex; justify-content: space-between; gap: 12px; }
 .detItem small { color: var(--muted); }
 .detItem.empty { color: var(--muted); }
 
@@ -222,6 +224,13 @@ input[type="range"] { width: 100%; }
     padding: 10px 12px;
 }
 
+@media (max-width: 1320px) {
+    .canvasGrid3,
+    .telemetryGrid3 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
 @media (max-width: 1180px) {
     .dashboard {
         grid-template-columns: 1fr;
@@ -233,7 +242,9 @@ input[type="range"] { width: 100%; }
     .cameraControls,
     .controlColumns,
     .telemetryGrid,
-    .canvasGrid {
+    .telemetryGrid3,
+    .canvasGrid,
+    .canvasGrid3 {
         grid-template-columns: 1fr;
     }
 }

@@ -5,6 +5,7 @@ const ui = {
     modeBadge: document.getElementById('modeBadge'),
     missionBadge: document.getElementById('missionBadge'),
     overlayBadge: document.getElementById('overlayBadge'),
+    lidarBadge: document.getElementById('lidarBadge'),
     statusText: document.getElementById('statusText'),
     autoState: document.getElementById('autoState'),
     targetVal: document.getElementById('targetVal'),
@@ -16,6 +17,15 @@ const ui = {
     pitchVal: document.getElementById('pitchVal'),
     yawVal: document.getElementById('yawVal'),
     gyroVecVal: document.getElementById('gyroVecVal'),
+    lidarStatusVal: document.getElementById('lidarStatusVal'),
+    lidarHzVal: document.getElementById('lidarHzVal'),
+    lidarSamplesVal: document.getElementById('lidarSamplesVal'),
+    lidarFrontVal: document.getElementById('lidarFrontVal'),
+    lidarFrontRightVal: document.getElementById('lidarFrontRightVal'),
+    lidarRightVal: document.getElementById('lidarRightVal'),
+    lidarRearVal: document.getElementById('lidarRearVal'),
+    lidarLeftVal: document.getElementById('lidarLeftVal'),
+    lidarFrontLeftVal: document.getElementById('lidarFrontLeftVal'),
     leftThruster: document.getElementById('leftThruster'),
     rightThruster: document.getElementById('rightThruster'),
     conveyor: document.getElementById('conveyor'),
@@ -32,12 +42,15 @@ const ui = {
     detectionsBox: document.getElementById('detectionsBox'),
     videoFeed: document.getElementById('videoFeed'),
     compassCanvas: document.getElementById('compassCanvas'),
-    gyroCanvas: document.getElementById('gyroCanvas')
+    gyroCanvas: document.getElementById('gyroCanvas'),
+    lidarCanvas: document.getElementById('lidarCanvas')
 };
 
 let ws = null;
 let currentMode = 'manual';
 let manualLocked = false;
+let lastLidarPoints = [];
+let lastLidarMaxDistance = 8000;
 
 function logLine(msg) {
     const line = document.createElement('div');
@@ -100,6 +113,11 @@ function sendIfManual(payload) {
     sendWs(payload);
 }
 
+function mmText(v) {
+    if (!Number.isFinite(v) || v <= 0) return '--';
+    return `${Math.round(v)} mm`;
+}
+
 function applyTelemetry(t) {
     currentMode = t.mode || 'manual';
     manualLocked = !!t.drive_controls_locked;
@@ -116,6 +134,12 @@ function applyTelemetry(t) {
     ui.overlayBadge.classList.toggle('badge-on', !!t.overlay_enabled);
     ui.overlayBadge.classList.toggle('badge-off', !t.overlay_enabled);
 
+    const lidar = t.lidar || {};
+    const lidarConnected = !!lidar.connected;
+    ui.lidarBadge.textContent = lidarConnected ? (lidar.mock_mode ? 'LIDAR MOCK' : 'LIDAR ON') : 'LIDAR OFF';
+    ui.lidarBadge.classList.toggle('badge-on', lidarConnected);
+    ui.lidarBadge.classList.toggle('badge-off', !lidarConnected);
+
     ui.statusText.textContent = `status: ${t.status_text || '--'}`;
     ui.autoState.textContent = `auto state: ${t.auto_state || '--'}`;
     ui.targetVal.textContent = `Target: ${(t.vision?.target || '--')} (${((t.vision?.confidence || 0) * 100).toFixed(0)}%)`;
@@ -129,6 +153,16 @@ function applyTelemetry(t) {
     ui.yawVal.textContent = `${(t.imu?.yaw_rate_dps || 0).toFixed(1)} °/s`;
     ui.gyroVecVal.textContent = `${(t.imu?.gyro_x_dps || 0).toFixed(1)} / ${(t.imu?.gyro_y_dps || 0).toFixed(1)} / ${(t.imu?.gyro_z_dps || 0).toFixed(1)}`;
 
+    ui.lidarStatusVal.textContent = lidarConnected ? (lidar.status_text || (lidar.mock_mode ? 'mock' : 'running')) : '--';
+    ui.lidarHzVal.textContent = `${(lidar.scan_hz || 0).toFixed(1)} Hz`;
+    ui.lidarSamplesVal.textContent = `${Math.round(lidar.sample_count || 0)}`;
+    ui.lidarFrontVal.textContent = mmText(lidar.front_mm);
+    ui.lidarFrontRightVal.textContent = mmText(lidar.front_right_mm);
+    ui.lidarRightVal.textContent = mmText(lidar.right_mm);
+    ui.lidarRearVal.textContent = mmText(lidar.rear_mm);
+    ui.lidarLeftVal.textContent = mmText(lidar.left_mm);
+    ui.lidarFrontLeftVal.textContent = mmText(lidar.front_left_mm);
+
     ui.leftThruster.value = Math.round(t.motors?.left_pct || 0);
     ui.rightThruster.value = Math.round(t.motors?.right_pct || 0);
     ui.conveyor.value = Math.round(t.motors?.conveyor_pct || 0);
@@ -139,11 +173,20 @@ function applyTelemetry(t) {
     ui.brightRange.value = Math.round(t.camera?.brightness || 50);
     ui.contrastRange.value = Math.round(t.camera?.contrast || 50);
 
+    lastLidarPoints = Array.isArray(lidar.points) ? lidar.points : [];
+    lastLidarMaxDistance = Math.max(1000, Number(lidar.max_distance_mm || 8000));
+
     refreshDisplayedValues();
     updateManualLockUi();
     renderDetections(t.vision?.detections || []);
     drawCompass(t.compass?.heading_deg || 0);
     drawGyro(t.imu?.roll_deg || 0, t.imu?.pitch_deg || 0, t.imu?.yaw_rate_dps || 0);
+    drawLidar(lastLidarPoints, lastLidarMaxDistance, {
+        front: lidar.front_mm || 0,
+        right: lidar.right_mm || 0,
+        left: lidar.left_mm || 0,
+        rear: lidar.rear_mm || 0
+    });
 }
 
 function updateManualLockUi() {
@@ -172,8 +215,7 @@ function renderDetections(detections) {
         const div = document.createElement('div');
         div.className = `detItem ${det.primary ? 'primary' : ''}`;
         div.innerHTML = `
-            <strong>${idx + 1}. ${det.label}</strong>
-            <span>${(det.confidence * 100).toFixed(0)}%</span>
+            <strong><span>${idx + 1}. ${det.label}</span><span>${(det.confidence * 100).toFixed(0)}%</span></strong>
             <small>x=${det.x}, y=${det.y}, w=${det.w}, h=${det.h}</small>
         `;
         ui.detectionsBox.appendChild(div);
@@ -304,6 +346,71 @@ function drawGyro(roll, pitch, yawRate) {
     ctx.fillText(`Yaw rate: ${yawRate.toFixed(1)} °/s`, 18, 76);
 }
 
+function drawLidar(points, maxDistance, sectors) {
+    const ctx = ui.lidarCanvas.getContext('2d');
+    const w = ui.lidarCanvas.width;
+    const h = ui.lidarCanvas.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const r = Math.min(w, h) * 0.43;
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = '#243244';
+    ctx.lineWidth = 1;
+    for (let ring = 1; ring <= 4; ring += 1) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, (r * ring) / 4, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - r);
+    ctx.lineTo(cx, cy + r);
+    ctx.moveTo(cx - r, cy);
+    ctx.lineTo(cx + r, cy);
+    ctx.stroke();
+
+    ctx.fillStyle = '#cbd5e1';
+    ctx.font = '13px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Front', cx, 16);
+    ctx.fillText('Rear', cx, h - 8);
+    ctx.fillText('Left', 26, cy + 4);
+    ctx.fillText('Right', w - 26, cy + 4);
+
+    for (const p of points) {
+        if (!Number.isFinite(p.a) || !Number.isFinite(p.d) || p.d <= 0) continue;
+        const ratio = Math.min(1, p.d / maxDistance);
+        const rr = ratio * r;
+        const rad = (p.a - 90) * Math.PI / 180;
+        const x = cx + Math.cos(rad) * rr;
+        const y = cy + Math.sin(rad) * rr;
+
+        const near = p.d < 600;
+        const mid = p.d >= 600 && p.d < 1400;
+        ctx.fillStyle = near ? '#ef4444' : (mid ? '#f59e0b' : '#38bdf8');
+        ctx.fillRect(x, y, 2, 2);
+    }
+
+    ctx.strokeStyle = '#22c55e';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx, cy - r);
+    ctx.stroke();
+
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '14px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(`F ${mmText(sectors.front)}`, 12, 22);
+    ctx.fillText(`R ${mmText(sectors.right)}`, 12, 42);
+    ctx.fillText(`L ${mmText(sectors.left)}`, 12, 62);
+    ctx.fillText(`B ${mmText(sectors.rear)}`, 12, 82);
+}
+
 ui.leftThruster.addEventListener('input', () => { refreshDisplayedValues(); sendThrusters(); });
 ui.rightThruster.addEventListener('input', () => { refreshDisplayedValues(); sendThrusters(); });
 ui.conveyor.addEventListener('input', () => { refreshDisplayedValues(); sendConveyor(); });
@@ -386,4 +493,5 @@ ui.videoFeed.addEventListener('error', () => {
 refreshDisplayedValues();
 drawCompass(0);
 drawGyro(0, 0, 0);
+drawLidar([], 8000, { front: 0, right: 0, left: 0, rear: 0 });
 connectWs();

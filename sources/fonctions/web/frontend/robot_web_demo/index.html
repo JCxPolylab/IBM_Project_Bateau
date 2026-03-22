@@ -10,13 +10,14 @@
     <header class="topbar">
         <div>
             <h1>CATJ Boat Remote Dashboard</h1>
-            <p>Supervision temps réel, pilotage manuel / auto, overlay des détections et télémétrie live.</p>
+            <p>Supervision temps réel, pilotage manuel / auto, overlay des détections, télémétrie live et vue LiDAR.</p>
         </div>
         <div class="topBadges">
             <span id="wsBadge" class="badge badge-off">WS disconnected</span>
             <span id="modeBadge" class="badge">MODE --</span>
             <span id="missionBadge" class="badge">MISSION --</span>
             <span id="overlayBadge" class="badge">Overlay --</span>
+            <span id="lidarBadge" class="badge">LIDAR --</span>
         </div>
     </header>
 
@@ -49,17 +50,28 @@
 
         <section class="panel telemetryPanel">
             <div class="panelHead">
-                <h2>Orientation et télémétrie</h2>
+                <h2>Orientation, télémétrie et LiDAR</h2>
             </div>
-            <div class="telemetryGrid">
+            <div class="telemetryGrid telemetryGrid3">
                 <div class="telemetryCard"><span>Heading</span><strong id="headingVal">--</strong></div>
                 <div class="telemetryCard"><span>Mag North</span><strong id="northVal">--</strong></div>
+                <div class="telemetryCard"><span>LiDAR status</span><strong id="lidarStatusVal">--</strong></div>
                 <div class="telemetryCard"><span>Roll</span><strong id="rollVal">--</strong></div>
                 <div class="telemetryCard"><span>Pitch</span><strong id="pitchVal">--</strong></div>
                 <div class="telemetryCard"><span>Yaw rate</span><strong id="yawVal">--</strong></div>
                 <div class="telemetryCard"><span>Gyro XYZ</span><strong id="gyroVecVal">--</strong></div>
+                <div class="telemetryCard"><span>Scan rate</span><strong id="lidarHzVal">--</strong></div>
+                <div class="telemetryCard"><span>Samples</span><strong id="lidarSamplesVal">--</strong></div>
             </div>
-            <div class="canvasGrid">
+            <div class="telemetryGrid telemetryGrid3 sectorGrid">
+                <div class="telemetryCard"><span>Front</span><strong id="lidarFrontVal">--</strong></div>
+                <div class="telemetryCard"><span>Front right</span><strong id="lidarFrontRightVal">--</strong></div>
+                <div class="telemetryCard"><span>Right</span><strong id="lidarRightVal">--</strong></div>
+                <div class="telemetryCard"><span>Rear</span><strong id="lidarRearVal">--</strong></div>
+                <div class="telemetryCard"><span>Left</span><strong id="lidarLeftVal">--</strong></div>
+                <div class="telemetryCard"><span>Front left</span><strong id="lidarFrontLeftVal">--</strong></div>
+            </div>
+            <div class="canvasGrid canvasGrid3">
                 <div class="canvasCard">
                     <h3>Rose des caps</h3>
                     <canvas id="compassCanvas" width="320" height="320"></canvas>
@@ -67,6 +79,10 @@
                 <div class="canvasCard">
                     <h3>Vue gyroscopes</h3>
                     <canvas id="gyroCanvas" width="320" height="320"></canvas>
+                </div>
+                <div class="canvasCard">
+                    <h3>Vue LiDAR</h3>
+                    <canvas id="lidarCanvas" width="320" height="320"></canvas>
                 </div>
             </div>
         </section>

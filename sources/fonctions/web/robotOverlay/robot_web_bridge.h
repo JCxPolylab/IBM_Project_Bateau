@@ -61,6 +61,31 @@ struct VisionTelemetry {
     double confidence = 0.0;
 };
 
+struct LidarPointTelemetry {
+    float angleDeg = 0.0f;
+    float distanceMm = 0.0f;
+    int quality = 0;
+};
+
+struct LidarTelemetry {
+    bool enabled = false;
+    bool connected = false;
+    bool scanning = false;
+    bool mockMode = false;
+    double scanHz = 0.0;
+    int sampleCount = 0;
+    float minDistanceMm = 0.0f;
+    float frontMm = 0.0f;
+    float frontRightMm = 0.0f;
+    float rightMm = 0.0f;
+    float rearMm = 0.0f;
+    float leftMm = 0.0f;
+    float frontLeftMm = 0.0f;
+    float maxDistanceMm = 8000.0f;
+    std::string statusText = "idle";
+    std::vector<LidarPointTelemetry> points;
+};
+
 struct RobotTelemetry {
     RobotMode mode = RobotMode::Manual;
     bool missionEnabled = false;
@@ -76,6 +101,7 @@ struct RobotTelemetry {
     MotorTelemetry motors;
     CameraTelemetry camera;
     VisionTelemetry vision;
+    LidarTelemetry lidar;
 };
 
 enum class ControlEventType {
@@ -158,7 +184,6 @@ private:
     void setupWebBindings_();
     void handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev);
     void emitControlEvent_(ControlEvent ev);
-    bool isManualAction_(const std::string& action) const;
 
     cv::Mat buildOverlayFrame_(const cv::Mat& frameBgr) const;
     std::string buildTelemetryJson_() const;

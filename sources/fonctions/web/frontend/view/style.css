@@ -10,6 +10,8 @@
     --bad: #ef4444;
     --accent: #38bdf8;
     --accent-2: #818cf8;
+    --manual: #10b981;
+    --auto: #3b82f6;
 }
 
 * { box-sizing: border-box; }
@@ -21,7 +23,7 @@ body {
 }
 
 .topbar {
-    width: min(1520px, calc(100% - 28px));
+    width: min(1680px, calc(100% - 28px));
     margin: 18px auto 0;
     display: flex;
     justify-content: space-between;
@@ -30,7 +32,7 @@ body {
 }
 .topbar h1 { margin: 0 0 6px; }
 .topbar p { margin: 0; color: var(--muted); }
-.statusBox { display: flex; gap: 10px; flex-wrap: wrap; }
+.topBadges { display: flex; gap: 10px; flex-wrap: wrap; }
 .badge {
     display: inline-flex;
     align-items: center;
@@ -42,9 +44,11 @@ body {
 }
 .badge-on { background: rgba(34, 197, 94, 0.15); color: #bbf7d0; }
 .badge-off { background: rgba(239, 68, 68, 0.15); color: #fecaca; }
+.badge-manual { background: rgba(16,185,129,0.20); color: #bbf7d0; }
+.badge-auto { background: rgba(59,130,246,0.22); color: #dbeafe; }
 
 .dashboard {
-    width: min(1520px, calc(100% - 28px));
+    width: min(1680px, calc(100% - 28px));
     margin: 18px auto 28px;
     display: grid;
     grid-template-columns: 1.35fr 1fr;
@@ -87,9 +91,17 @@ button {
     color: white;
     background: linear-gradient(180deg, var(--accent), var(--accent-2));
 }
+button.secondary {
+    background: linear-gradient(180deg, #475569, #334155);
+}
 button:hover { filter: brightness(1.08); }
 button.danger {
     background: linear-gradient(180deg, #ef4444, #b91c1c);
+}
+button:disabled,
+input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 .videoWrap {
@@ -105,6 +117,18 @@ button.danger {
     object-fit: cover;
     display: block;
 }
+.videoFooter {
+    margin-top: 12px;
+    display: grid;
+    gap: 6px;
+}
+.statusRow {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.statusRow.muted { color: var(--muted); }
 
 .cameraControls, .controlColumns, .telemetryGrid, .canvasGrid {
     display: grid;
@@ -112,7 +136,9 @@ button.danger {
 }
 .cameraControls, .controlColumns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .telemetryGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 14px; }
+.telemetryGrid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .canvasGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.canvasGrid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 .controlBlock, .telemetryCard, .canvasCard {
     background: rgba(255,255,255,0.03);
@@ -128,7 +154,7 @@ button.danger {
     color: var(--muted);
 }
 .telemetryCard span { color: var(--muted); display: block; }
-.telemetryCard strong { font-size: 1.35rem; display: block; margin-top: 6px; }
+.telemetryCard strong { font-size: 1.25rem; display: block; margin-top: 6px; }
 .value { margin-top: 8px; color: #bfdbfe; font-weight: 700; }
 
 input[type="range"] { width: 100%; }
@@ -144,10 +170,47 @@ input[type="range"] { width: 100%; }
     gap: 10px;
     justify-items: center;
 }
+.miniTelemetry {
+    margin-top: 10px;
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+}
+.lockBanner {
+    margin-bottom: 14px;
+    border: 1px solid rgba(239,68,68,0.35);
+    background: rgba(239,68,68,0.12);
+    color: #fecaca;
+    padding: 10px 12px;
+    border-radius: 12px;
+    font-weight: 700;
+}
+.hidden { display: none; }
+
+.detectionsBox {
+    display: grid;
+    gap: 10px;
+    min-height: 180px;
+}
+.detItem {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.05);
+    background: rgba(255,255,255,0.04);
+}
+.detItem.primary {
+    border-color: rgba(250, 204, 21, 0.45);
+    background: rgba(250, 204, 21, 0.10);
+}
+.detItem strong { display: flex; justify-content: space-between; gap: 12px; }
+.detItem small { color: var(--muted); }
+.detItem.empty { color: var(--muted); }
 
 .logBox {
     min-height: 260px;
-    max-height: 480px;
+    max-height: 540px;
     overflow: auto;
     display: grid;
     gap: 8px;
@@ -161,6 +224,13 @@ input[type="range"] { width: 100%; }
     padding: 10px 12px;
 }
 
+@media (max-width: 1320px) {
+    .canvasGrid3,
+    .telemetryGrid3 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
 @media (max-width: 1180px) {
     .dashboard {
         grid-template-columns: 1fr;
@@ -172,7 +242,9 @@ input[type="range"] { width: 100%; }
     .cameraControls,
     .controlColumns,
     .telemetryGrid,
-    .canvasGrid {
+    .telemetryGrid3,
+    .canvasGrid,
+    .canvasGrid3 {
         grid-template-columns: 1fr;
     }
 }

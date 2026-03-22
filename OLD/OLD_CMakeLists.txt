@@ -9,7 +9,10 @@ file(GLOB_RECURSE SRC_CPP CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/sources/*.cpp"
 )
 
-# Si tu as des fichiers "Copie" à exclure :
+# Exclusions : copies, backups, anciens main, exemples
+list(FILTER SRC_CPP EXCLUDE REGEX ".*main - Copie\\.cpp$")
+list(FILTER SRC_CPP EXCLUDE REGEX ".*OLD_main\\.cpp$")
+list(FILTER SRC_CPP EXCLUDE REGEX ".*example_.*_main\\.cpp$")
 list(FILTER SRC_CPP EXCLUDE REGEX ".*Copie.*")
 
 add_executable(CATJ_ibmRobotProject
@@ -30,7 +33,6 @@ target_link_libraries(CATJ_ibmRobotProject PRIVATE
 )
 
 # ---- ONNX Runtime (optionnel) ----
-# Exemple: ORT_ROOT=/home/pi/libs/onnxruntime-linux-aarch64-1.xx.x
 option(USE_ORT "Enable ONNX Runtime" OFF)
 set(ORT_ROOT "${CMAKE_SOURCE_DIR}/onnxruntime" CACHE PATH "Path to ONNX Runtime root")
 
@@ -38,7 +40,7 @@ if(USE_ORT)
   if(EXISTS "${ORT_ROOT}/onnxruntime_cxx_api.h")
     message(STATUS "Using ONNX Runtime from: ${ORT_ROOT}")
     target_compile_definitions(CATJ_ibmRobotProject PRIVATE CATJ_USE_ORT=1)
-    target_include_directories(CATJ_ibmRobotProject PRIVATE "${ORT_ROOT}/include")
+    target_include_directories(CATJ_ibmRobotProject PRIVATE "${ORT_ROOT}")
     target_link_directories(CATJ_ibmRobotProject PRIVATE "${ORT_ROOT}/lib")
     target_link_libraries(CATJ_ibmRobotProject PRIVATE onnxruntime)
     set_target_properties(CATJ_ibmRobotProject PROPERTIES

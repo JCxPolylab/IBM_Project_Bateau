@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace CATJ_robot_web {
@@ -22,12 +24,12 @@ std::string trimLowerCopy(const std::string& s)
 }
 
 void drawLabelBox(cv::Mat& frame,
-    const std::string& text,
-    const cv::Point& anchor,
-    const cv::Scalar& bg,
-    const cv::Scalar& fg = cv::Scalar(255, 255, 255),
-    double scale = 0.42,
-    int thickness = 1)
+                  const std::string& text,
+                  const cv::Point& anchor,
+                  const cv::Scalar& bg,
+                  const cv::Scalar& fg = cv::Scalar(255, 255, 255),
+                  double scale = 0.42,
+                  int thickness = 1)
 {
     int baseline = 0;
     const cv::Size textSize = cv::getTextSize(
@@ -53,13 +55,21 @@ void drawLabelBox(cv::Mat& frame,
 
     cv::rectangle(frame, rect, bg, cv::FILLED);
     cv::putText(frame,
-        text,
-        { rect.x + padX, rect.y + rect.height - padY },
-        cv::FONT_HERSHEY_SIMPLEX,
-        scale,
-        fg,
-        thickness,
-        cv::LINE_AA);
+                text,
+                {rect.x + padX, rect.y + rect.height - padY},
+                cv::FONT_HERSHEY_SIMPLEX,
+                scale,
+                fg,
+                thickness,
+                cv::LINE_AA);
+}
+
+std::string fmm(float v)
+{
+    if (!std::isfinite(v) || v <= 0.0f) return "--";
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(0) << v;
+    return oss.str();
 }
 
 } // namespace
@@ -220,8 +230,7 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         remoteEnabled = telemetry_.remoteControlEnabled;
     }
 
-    if (!remoteEnabled) 
-    {
+    if (!remoteEnabled) {
         out.type = ControlEventType::RawWebCommand;
         out.name = ev.action;
         out.accepted = false;
@@ -229,8 +238,7 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         return;
     }
 
-    if (ev.action == "mode_set") 
-    {
+    if (ev.action == "mode_set") {
         const std::string mode = ev.fields.count("mode") ? trimLowerCopy(ev.fields.at("mode")) : "manual";
         out.type = ControlEventType::SetMode;
         out.name = mode;
@@ -368,16 +376,6 @@ void RobotWebBridge::emitControlEvent_(ControlEvent ev)
     if (handler) handler(ev);
 }
 
-bool RobotWebBridge::isManualAction_(const std::string& action) const
-{
-    return action == "thrusters"
-        || action == "conveyor"
-        || action == "camera_step"
-        || action == "camera_center"
-        || action == "drive_preset"
-        || action == "stop_all";
-}
-
 cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
 {
     if (frameBgr.empty()) return frameBgr;
@@ -414,7 +412,6 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
     const int line1Y = smallFrame ? 58 : 78;
     const int line2Y = smallFrame ? 78 : 106;
 
-    // Détections
     for (const auto& det : detectionsLocal) {
         cv::Rect box = det.box & cv::Rect(0, 0, out.cols, out.rows);
         if (box.width <= 1 || box.height <= 1) continue;
@@ -423,69 +420,70 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
         cv::rectangle(out, box, color, det.primary ? boxThicknessPrimary : boxThickness, cv::LINE_AA);
 
         std::ostringstream label;
-        label << det.label << ' '
-            << std::fixed << std::setprecision(0)
-            << (det.confidence * 100.0) << '%';
+        label << det.label << ' ' << std::fixed << std::setprecision(0)
+              << (det.confidence * 100.0) << '%';
 
         drawLabelBox(out,
-            label.str(),
-            { box.x, std::max(18, box.y) },
-            color,
-            cv::Scalar(255, 255, 255),
-            labelScale,
-            1);
+                     label.str(),
+                     {box.x, std::max(18, box.y)},
+                     color,
+                     cv::Scalar(255, 255, 255),
+                     labelScale,
+                     1);
 
         cv::circle(out,
-            { box.x + box.width / 2, box.y + box.height / 2 },
-            smallFrame ? 3 : 4,
-            color,
-            cv::FILLED,
-            cv::LINE_AA);
+                   {box.x + box.width / 2, box.y + box.height / 2},
+                   smallFrame ? 3 : 4,
+                   color,
+                   cv::FILLED,
+                   cv::LINE_AA);
     }
 
-    // Badges compacts
     drawLabelBox(out,
-        telem.mode == RobotMode::Auto ? "AUTO" : "MANUAL",
-        { margin, 28 },
-        telem.mode == RobotMode::Auto ? autoColor : manualColor,
-        cv::Scalar(255, 255, 255),
-        labelScale,
-        1);
+                 telem.mode == RobotMode::Auto ? "AUTO" : "MANUAL",
+                 {margin, 28},
+                 telem.mode == RobotMode::Auto ? autoColor : manualColor,
+                 cv::Scalar(255, 255, 255),
+                 labelScale,
+                 1);
 
     if (telem.missionEnabled) {
         drawLabelBox(out,
-            "MISSION",
-            { smallFrame ? 95 : 120, 28 },
-            cv::Scalar(34, 197, 94),
-            cv::Scalar(255, 255, 255),
-            labelScale,
-            1);
+                     "MISSION",
+                     {smallFrame ? 95 : 120, 28},
+                     cv::Scalar(34, 197, 94),
+                     cv::Scalar(255, 255, 255),
+                     labelScale,
+                     1);
     }
 
     if (!telem.remoteControlEnabled) {
         drawLabelBox(out,
-            "REMOTE OFF",
-            { smallFrame ? 175 : 220, 28 },
-            warnColor,
-            cv::Scalar(255, 255, 255),
-            labelScale,
-            1);
+                     "REMOTE OFF",
+                     {smallFrame ? 175 : 220, 28},
+                     warnColor,
+                     cv::Scalar(255, 255, 255),
+                     labelScale,
+                     1);
     }
 
-    // Petit bandeau haut uniquement
     std::ostringstream line1;
     line1 << std::fixed << std::setprecision(0)
-        << "HDG " << telem.compass.headingDeg
-        << " | MAG " << telem.compass.magneticNorthDeg
-        << " | FPS " << std::setprecision(1) << telem.vision.fps;
+          << "HDG " << telem.compass.headingDeg
+          << " | MAG " << telem.compass.magneticNorthDeg
+          << " | FPS " << std::setprecision(1) << telem.vision.fps;
+
+    if (telem.lidar.enabled) {
+        line1 << " | LID F " << fmm(telem.lidar.frontMm);
+    }
 
     std::ostringstream line2;
     line2 << "Target: " << telem.vision.target
-        << " (" << std::fixed << std::setprecision(0)
-        << (telem.vision.confidence * 100.0) << "%)"
-        << " | L " << telem.motors.leftPct
-        << " R " << telem.motors.rightPct
-        << " C " << telem.motors.conveyorPct;
+          << " (" << std::fixed << std::setprecision(0)
+          << (telem.vision.confidence * 100.0) << "%)"
+          << " | L " << telem.motors.leftPct
+          << " R " << telem.motors.rightPct
+          << " C " << telem.motors.conveyorPct;
 
     int baseline = 0;
     cv::Size s1 = cv::getTextSize(line1.str(), cv::FONT_HERSHEY_SIMPLEX, textScale1, textThickness, &baseline);
@@ -496,27 +494,27 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
     panelW = std::min(panelW, out.cols - 2 * margin);
 
     cv::rectangle(out,
-        cv::Rect(margin, 34, panelW, panelH),
-        panelBg,
-        cv::FILLED);
+                  cv::Rect(margin, 34, panelW, panelH),
+                  panelBg,
+                  cv::FILLED);
 
     cv::putText(out,
-        line1.str(),
-        { margin + 8, line1Y },
-        cv::FONT_HERSHEY_SIMPLEX,
-        textScale1,
-        cv::Scalar(255, 255, 255),
-        textThickness,
-        cv::LINE_AA);
+                line1.str(),
+                {margin + 8, line1Y},
+                cv::FONT_HERSHEY_SIMPLEX,
+                textScale1,
+                cv::Scalar(255, 255, 255),
+                textThickness,
+                cv::LINE_AA);
 
     cv::putText(out,
-        line2.str(),
-        { margin + 8, line2Y },
-        cv::FONT_HERSHEY_SIMPLEX,
-        textScale2,
-        cv::Scalar(210, 220, 235),
-        textThickness,
-        cv::LINE_AA);
+                line2.str(),
+                {margin + 8, line2Y},
+                cv::FONT_HERSHEY_SIMPLEX,
+                textScale2,
+                cv::Scalar(210, 220, 235),
+                textThickness,
+                cv::LINE_AA);
 
     return out;
 }
@@ -596,7 +594,37 @@ std::string RobotWebBridge::buildTelemetryJson_() const
         oss << '}';
     }
     oss << ']';
+    oss << "},";
+
+    oss << "\"lidar\":{";
+    oss << "\"enabled\":" << jsonBool_(t.lidar.enabled) << ',';
+    oss << "\"connected\":" << jsonBool_(t.lidar.connected) << ',';
+    oss << "\"scanning\":" << jsonBool_(t.lidar.scanning) << ',';
+    oss << "\"mock_mode\":" << jsonBool_(t.lidar.mockMode) << ',';
+    oss << "\"scan_hz\":" << t.lidar.scanHz << ',';
+    oss << "\"sample_count\":" << t.lidar.sampleCount << ',';
+    oss << "\"min_distance_mm\":" << t.lidar.minDistanceMm << ',';
+    oss << "\"front_mm\":" << t.lidar.frontMm << ',';
+    oss << "\"front_right_mm\":" << t.lidar.frontRightMm << ',';
+    oss << "\"right_mm\":" << t.lidar.rightMm << ',';
+    oss << "\"rear_mm\":" << t.lidar.rearMm << ',';
+    oss << "\"left_mm\":" << t.lidar.leftMm << ',';
+    oss << "\"front_left_mm\":" << t.lidar.frontLeftMm << ',';
+    oss << "\"max_distance_mm\":" << t.lidar.maxDistanceMm << ',';
+    oss << "\"status_text\":\"" << esc(t.lidar.statusText) << "\",";
+    oss << "\"points\":[";
+    for (size_t i = 0; i < t.lidar.points.size(); ++i) {
+        if (i) oss << ',';
+        const auto& p = t.lidar.points[i];
+        oss << '{';
+        oss << "\"a\":" << p.angleDeg << ',';
+        oss << "\"d\":" << p.distanceMm << ',';
+        oss << "\"q\":" << p.quality;
+        oss << '}';
+    }
+    oss << ']';
     oss << '}';
+
     oss << '}';
     return oss.str();
 }
@@ -625,9 +653,9 @@ bool RobotWebBridge::toBool_(const std::unordered_map<std::string, std::string>&
 {
     auto it = fields.find(key);
     if (it == fields.end()) return fallback;
-    const std::string v = trimLowerCopy(it->second);
-    if (v == "1" || v == "true" || v == "on" || v == "yes") return true;
-    if (v == "0" || v == "false" || v == "off" || v == "no") return false;
+    const std::string value = trimLowerCopy(it->second);
+    if (value == "1" || value == "true" || value == "on" || value == "yes") return true;
+    if (value == "0" || value == "false" || value == "off" || value == "no") return false;
     return fallback;
 }
 
