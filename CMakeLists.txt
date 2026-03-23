@@ -19,7 +19,7 @@ set(RPLIDAR_SDK_ROOT "${CMAKE_SOURCE_DIR}/third_party/rplidar_sdk/sdk" CACHE PAT
 # Dependencies
 # -----------------------------------------------------------------------------
 find_package(Threads REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio highgui dnn)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio highgui dnn calib3d)
 
 # -----------------------------------------------------------------------------
 # Project sources
@@ -32,12 +32,12 @@ file(GLOB_RECURSE PROJECT_SOURCES CONFIGURE_DEPENDS
 list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*/example/.*")
 list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*OLD_main\\.cpp$")
 list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*main - Copie\\.cpp$")
+list(FILTER PROJECT_SOURCES EXCLUDE REGEX ".*example_.*_main\\.cpp$")
 
 add_executable(CATJ_ibmRobotProject
     ${PROJECT_SOURCES}
 )
 
-# Base includes for your project code.
 target_include_directories(CATJ_ibmRobotProject PRIVATE
     "${CMAKE_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/sources"
@@ -46,55 +46,50 @@ target_include_directories(CATJ_ibmRobotProject PRIVATE
 
 # -----------------------------------------------------------------------------
 # Optional: official SLAMTEC RPLIDAR SDK
-# Your current code in sources/fonctions/capteur/lidar/Lidar.cpp uses:
-#   #include "sl_lidar.h"
-#   #include "sl_lidar_driver.h"
-# so the SDK include path must expose third_party/rplidar_sdk/sdk/include.
 # -----------------------------------------------------------------------------
 if(USE_RPLIDAR_SDK)
-    set(RPLIDAR_REQUIRED_FILES
-        "${RPLIDAR_SDK_ROOT}/include/sl_lidar.h"
-        "${RPLIDAR_SDK_ROOT}/include/sl_lidar_driver.h"
-        "${RPLIDAR_SDK_ROOT}/src/sl_lidar_driver.cpp"
-        "${RPLIDAR_SDK_ROOT}/src/sl_serial_channel.cpp"
-        "${RPLIDAR_SDK_ROOT}/src/hal/thread.cpp"
-        "${RPLIDAR_SDK_ROOT}/src/dataunpacker/dataunpacker.cpp"
+    if(NOT EXISTS "${RPLIDAR_SDK_ROOT}/include/sl_lidar.h")
+        message(FATAL_ERROR "RPLIDAR SDK not found: ${RPLIDAR_SDK_ROOT}")
+    endif()
+
+    # Common SDK sources
+    file(GLOB_RECURSE RPLIDAR_SDK_COMMON_SOURCES CONFIGURE_DEPENDS
+        "${RPLIDAR_SDK_ROOT}/src/*.cpp"
     )
 
-    set(RPLIDAR_SDK_OK TRUE)
-    foreach(_f IN LISTS RPLIDAR_REQUIRED_FILES)
-        if(NOT EXISTS "${_f}")
-            set(RPLIDAR_SDK_OK FALSE)
-            message(WARNING "RPLIDAR SDK file missing: ${_f}")
-        endif()
-    endforeach()
-
-    if(RPLIDAR_SDK_OK)
-        add_library(catj_rplidar_sdk STATIC
-            "${RPLIDAR_SDK_ROOT}/src/hal/thread.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/dataunpacker/dataunpacker.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/sl_async_transceiver.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/sl_crc.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/sl_lidarprotocol_codec.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/sl_lidar_driver.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/sl_serial_channel.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/sl_tcp_channel.cpp"
-            "${RPLIDAR_SDK_ROOT}/src/sl_udp_channel.cpp"
-        )
-
-        target_include_directories(catj_rplidar_sdk PUBLIC
-            "${RPLIDAR_SDK_ROOT}/include"
-            "${RPLIDAR_SDK_ROOT}/src"
-        )
-
-        target_link_libraries(catj_rplidar_sdk PUBLIC Threads::Threads)
-        target_link_libraries(CATJ_ibmRobotProject PRIVATE catj_rplidar_sdk)
-        target_compile_definitions(CATJ_ibmRobotProject PRIVATE CATJ_USE_RPLIDAR_SDK=1)
-
-        message(STATUS "RPLIDAR SDK enabled from: ${RPLIDAR_SDK_ROOT}")
-    else()
-        message(WARNING "RPLIDAR SDK requested but incomplete. Build will continue; your Lidar.cpp will fall back to mock mode.")
+    # Keep only platform-relevant arch sources.
+    if(UNIX AND NOT APPLE)
+        list(FILTER RPLIDAR_SDK_COMMON_SOURCES EXCLUDE REGEX ".*/arch/macOS/.*")
+        list(FILTER RPLIDAR_SDK_COMMON_SOURCES EXCLUDE REGEX ".*/arch/win32/.*")
+    elseif(APPLE)
+        list(FILTER RPLIDAR_SDK_COMMON_SOURCES EXCLUDE REGEX ".*/arch/linux/.*")
+        list(FILTER RPLIDAR_SDK_COMMON_SOURCES EXCLUDE REGEX ".*/arch/win32/.*")
+    elseif(WIN32)
+        list(FILTER RPLIDAR_SDK_COMMON_SOURCES EXCLUDE REGEX ".*/arch/linux/.*")
+        list(FILTER RPLIDAR_SDK_COMMON_SOURCES EXCLUDE REGEX ".*/arch/macOS/.*")
     endif()
+
+    add_library(catj_rplidar_sdk STATIC
+        ${RPLIDAR_SDK_COMMON_SOURCES}
+    )
+
+    target_include_directories(catj_rplidar_sdk PUBLIC
+        "${RPLIDAR_SDK_ROOT}/include"
+        "${RPLIDAR_SDK_ROOT}/src"
+        "${RPLIDAR_SDK_ROOT}/src/dataunpacker"
+        "${RPLIDAR_SDK_ROOT}/src/dataunpacker/unpacker"
+    )
+
+    target_link_libraries(catj_rplidar_sdk PUBLIC Threads::Threads)
+
+    if(WIN32)
+        target_link_libraries(catj_rplidar_sdk PUBLIC ws2_32)
+    endif()
+
+    target_link_libraries(CATJ_ibmRobotProject PRIVATE catj_rplidar_sdk)
+    target_compile_definitions(CATJ_ibmRobotProject PRIVATE CATJ_USE_RPLIDAR_SDK=1)
+
+    message(STATUS "RPLIDAR SDK enabled from: ${RPLIDAR_SDK_ROOT}")
 endif()
 
 # -----------------------------------------------------------------------------
@@ -135,8 +130,6 @@ target_link_libraries(CATJ_ibmRobotProject PRIVATE
     Threads::Threads
 )
 
-# BlueZ is needed only if bluetooth headers are present and bluetooth.cpp really
-# compiles the Linux RFCOMM implementation. Linking it when found is harmless.
 if(UNIX AND NOT APPLE)
     find_library(BLUETOOTH_LIB bluetooth)
     if(BLUETOOTH_LIB)

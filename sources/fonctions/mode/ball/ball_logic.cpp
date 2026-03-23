@@ -11,7 +11,11 @@ float RobotBall::priority() const
     return static_cast<float>(score) / distanceM;
 }
 
-BallLogic::BallLogic(BallFilterConfig cfg) : cfg_(cfg) {}
+BallLogic::BallLogic() : cfg_{} {}
+
+BallLogic::BallLogic(const BallFilterConfig& cfg)
+    : cfg_(cfg) {
+}
 
 std::optional<RobotBall> BallLogic::fromCameraDetection(const CATJ_camera::Camera& cam,
                                                         const CATJ_camera::BallDetection& det,

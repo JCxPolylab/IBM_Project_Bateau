@@ -24,7 +24,8 @@ namespace CATJ_robot {
             int speedPct = 55;
         };
 
-        explicit ModeLabyrinthe(Config cfg = {});
+        ModeLabyrinthe();
+        explicit ModeLabyrinthe(const Config& cfg);
 
         void start();
         void stop();

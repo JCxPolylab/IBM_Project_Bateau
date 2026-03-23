@@ -1,4 +1,3 @@
 sources
 parametres
 build
-onnxruntime

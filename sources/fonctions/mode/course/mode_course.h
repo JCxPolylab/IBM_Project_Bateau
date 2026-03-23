@@ -21,10 +21,11 @@ namespace CATJ_robot {
             float distBalleCollecteeM = 0.20f;
             int conveyorNormalPct = 80;
             int conveyorRapidePct = 100;
-            std::chrono::milliseconds antiRebond{1500};
+            std::chrono::milliseconds antiRebond{ 1500 };
         };
 
-        explicit ModeCourse(Config cfg = {});
+        ModeCourse();
+        explicit ModeCourse(const Config& cfg);
 
         void prepare(int predictedScore);
         void start();
@@ -32,8 +33,8 @@ namespace CATJ_robot {
         bool running() const { return running_; }
 
         void update(const std::vector<RobotBall>& visibleBalls,
-                    float rearDistanceMm,
-                    MotherboardLink& board);
+            float rearDistanceMm,
+            MotherboardLink& board);
 
         int score() const { return score_; }
         int predictedScore() const { return predictedScore_; }

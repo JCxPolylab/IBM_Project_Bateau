@@ -40,17 +40,18 @@ namespace CATJ_robot {
 
     class BallLogic {
     public:
-        explicit BallLogic(BallFilterConfig cfg = {});
+        BallLogic();
+        explicit BallLogic(const BallFilterConfig& cfg);
 
         std::optional<RobotBall> fromCameraDetection(const CATJ_camera::Camera& cam,
-                                                     const CATJ_camera::BallDetection& det,
-                                                     int frameWidth,
-                                                     int frameHeight) const;
+            const CATJ_camera::BallDetection& det,
+            int frameWidth,
+            int frameHeight) const;
 
         std::vector<RobotBall> convert(const CATJ_camera::Camera& cam,
-                                       const std::vector<CATJ_camera::BallDetection>& dets,
-                                       int frameWidth,
-                                       int frameHeight) const;
+            const std::vector<CATJ_camera::BallDetection>& dets,
+            int frameWidth,
+            int frameHeight) const;
 
         std::optional<RobotBall> bestTarget(const std::vector<RobotBall>& balls) const;
         std::optional<RobotBall> nearestBall(const std::vector<RobotBall>& balls) const;
@@ -62,8 +63,8 @@ namespace CATJ_robot {
     private:
         float estimateAngleDeg_(int cx, int frameWidth) const;
         float estimateDistanceM_(const CATJ_camera::Camera& cam,
-                                 BallType type,
-                                 float apparentDiameterPx) const;
+            BallType type,
+            float apparentDiameterPx) const;
         static float apparentDiameterPx_(const cv::Rect& box);
 
         BallFilterConfig cfg_{};
