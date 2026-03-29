@@ -247,6 +247,23 @@ namespace CATJ_utility
 		return programme_mode::unknown;
 	}
 
+    inline std::string modeToStr(const programme_mode mode)
+    {
+        switch (mode) 
+        {
+        case programme_mode::course: return "course";
+        case programme_mode::ramassage: return "ramassage";
+        case programme_mode::calibration: return "calibration";
+        case programme_mode::camera: return "camera";
+        case programme_mode::lidar: return "lidar";
+        case programme_mode::colorsensor: return "colorsensor";
+        case programme_mode::gyro: return "gyro";
+        case programme_mode::navigation: return "navigation";
+        case programme_mode::remote: return "remote";
+        case programme_mode::debug: return "debug";
+        }
+	}
+
     inline std::string now_timestamp()
     {
         std::time_t t = std::time(nullptr);

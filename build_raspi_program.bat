@@ -8,7 +8,8 @@ set "CONFIG_FILE=%PROJECT_ROOT%devConfig.txt"
 
 rem Options de build
 set "BUILD_TYPE=Release"
-set "USE_ORT=ON"
+set "USE_ORT=OFF"
+set "USE_RPLIDAR=ON"
 
 rem =======================
 rem  CHECK OUTILS
@@ -49,8 +50,11 @@ echo.
 rem =======================
 rem  BUILD REMOTE
 rem =======================
+::ssh -p %PI_PORT% %PI_USER%@%PI_HOST% ^
+  ::"chmod -R u+rwx %REMOTE_DIR% && cd %REMOTE_DIR% && rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DUSE_RPLIDAR_SDK=%USE_RPLIDAR% -DUSE_ORT=%USE_ORT% && cmake --build build --parallel"
+
 ssh -p %PI_PORT% %PI_USER%@%PI_HOST% ^
-  "cd %REMOTE_DIR% && rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DUSE_ORT=%USE_ORT% && cmake --build build --parallel"
+  "cd %REMOTE_DIR% && rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DUSE_RPLIDAR_SDK=%USE_RPLIDAR% -DUSE_ORT=%USE_ORT% && cmake --build build -j$(nproc)"
 
 if errorlevel 1 (
   echo.

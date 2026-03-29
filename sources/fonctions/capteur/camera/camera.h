@@ -36,6 +36,19 @@ struct MeasureState {
 
 namespace CATJ_camera {
 
+    enum class CameraBackend {
+        Auto,
+        UsbV4L2,
+        CsiGStreamer
+    };
+
+    inline CameraBackend cameraBackendFromString(const std::string& s)
+    {
+        if (s == "usb" || s == "v4l2" || s == "usb_v4l2") return CameraBackend::UsbV4L2;
+        if (s == "csi" || s == "gstreamer" || s == "csi_gstreamer") return CameraBackend::CsiGStreamer;
+        return CameraBackend::Auto;
+    }
+
     enum class BallColor { Unknown, Red, Blue, White };
     enum class BallDecision { Unknown, Target, Ignore };
 
@@ -48,8 +61,9 @@ namespace CATJ_camera {
 
     class Camera {
     public:
-        Camera(int device = 0, int w = 640, int h = 480);
-        Camera(int w = 640, int h = 480);
+        Camera(int device = 0, int w = 640, int h = 480,
+            CameraBackend backend = CameraBackend::Auto,
+            const std::string& customPipeline = "");
         ~Camera();
 
         bool isOpen() const;
@@ -123,6 +137,11 @@ namespace CATJ_camera {
 
     private:
 		void captureLoop_(); //Fonction de capture video exectuer en multithreading
+
+        bool openUsbV4L2_(int device);
+        bool openCsiGStreamer_(int device, const std::string& customPipeline);
+
+        static std::string buildDefaultCsiPipeline_(int w, int h, int fps);
         bool undistordFrame_(const cv::Mat& in, cv::Mat& out);
         double apparentDiameterPxFromBox_(const cv::Rect& box);
         static void onMouse(int event, int x, int y, int /*flags*/, void* userdata);
@@ -196,6 +215,9 @@ namespace CATJ_camera {
 
         BallColor targetColor_ = BallColor::Red;   
         BallColor ignoreColor_ = BallColor::Blue;  
+
+        CameraBackend backend_ = CameraBackend::Auto;
+        std::string customPipeline_;
     };
 
 } // namespace CATJ_camera

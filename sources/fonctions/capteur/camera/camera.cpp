@@ -4,7 +4,10 @@ using namespace CATJ_camera;
 
 static inline int makeOdd(int k) { return (k % 2 == 0) ? k + 1 : k; }
 
-Camera::Camera(int device, int w, int h) : w_(w), h_(h)
+Camera::Camera(int device, int w, int h,
+    CameraBackend backend,
+    const std::string& customPipeline)
+    : w_(w), h_(h), backend_(backend), customPipeline_(customPipeline)
 {
 #ifdef _WIN32
     if (!cap_.open(device)) {
@@ -12,47 +15,112 @@ Camera::Camera(int device, int w, int h) : w_(w), h_(h)
         return;
     }
 #else
-    // Sur PiCam: /dev/video0, /dev/video1, ...
-    std::string devPath = "/dev/video" + std::to_string(device);
+    bool opened = false;
 
-    /*
-    if (!cap_.open(devPath, cv::CAP_V4L2)) {
-        std::cerr << "Impossible d'ouvrir la camera (" << devPath << ")\n";
+    switch (backend_) {
+    case CameraBackend::UsbV4L2:
+        opened = openUsbV4L2_(device);
+        break;
+
+    case CameraBackend::CsiGStreamer:
+        opened = openCsiGStreamer_(device, customPipeline_);
+        break;
+
+    case CameraBackend::Auto:
+    default:
+        // Auto : tente d'abord CSI, puis USB
+        opened = openCsiGStreamer_(device, customPipeline_);
+        if (!opened) {
+            std::cerr << "Auto backend: fallback vers USB/V4L2\n";
+            opened = openUsbV4L2_(device);
+        }
+        break;
+    }
+
+    if (!opened) {
+        std::cerr << "Aucun backend camera n'a pu être ouvert.\n";
         return;
     }
-    */
-    if (!cap_.open(device, cv::CAP_V4L2)) {
-        std::cerr << "Impossible d'ouvrir la camera (index=" << device << ")\n";
-        return;
-    }
-
-    cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
-    cap_.set(cv::CAP_PROP_FRAME_WIDTH, w_);
-    cap_.set(cv::CAP_PROP_FRAME_HEIGHT, h_);
-    cap_.set(cv::CAP_PROP_FPS, 30);
-    cap_.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('Y', 'U', 'Y', 'V'));
 #endif
 
     cv::Mat f;
-    cap_ >> f;
-    if (!f.empty()) {
+    bool gotFrame = false;
+    for (int i = 0; i < 20; ++i) {
+        if (cap_.read(f) && !f.empty()) {
+            gotFrame = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (gotFrame) {
         std::lock_guard<std::mutex> lk(m_);
         latest_ = f.clone();
+        std::cout << "Constructor: première frame OK "
+            << f.cols << "x" << f.rows
+            << " type=" << f.type()
+            << " channels=" << f.channels()
+            << std::endl;
+    }
+    else {
+        std::cerr << "Constructor: camera ouverte mais aucune frame initiale.\n";
     }
 }
 
-Camera::Camera(int w, int h) : w_(w), h_(h)
-{
-    int device = 0;
-    cap_.set(cv::CAP_PROP_FRAME_WIDTH, w_);
-    cap_.set(cv::CAP_PROP_FRAME_HEIGHT, h_);
-}
 
 Camera::~Camera() {
     stopRecording();
     stopCapture();
     cap_.release();
     cv::destroyAllWindows();
+}
+
+bool Camera::openUsbV4L2_(int device)
+{
+    std::string devPath = "/dev/video" + std::to_string(device);
+    std::cout << "Trying to open camera USB/V4L2 at " << devPath << " ...\n";
+
+    if (!cap_.open(devPath, cv::CAP_V4L2)) {
+        std::cerr << "Impossible d'ouvrir la camera USB/V4L2 (" << devPath << ")\n";
+        return false;
+    }
+
+    cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
+    cap_.set(cv::CAP_PROP_FRAME_WIDTH, w_);
+    cap_.set(cv::CAP_PROP_FRAME_HEIGHT, h_);
+    cap_.set(cv::CAP_PROP_FPS, fps_);
+
+    return true;
+}
+
+std::string Camera::buildDefaultCsiPipeline_(int w, int h, int fps)
+{
+    return "libcamerasrc ! "
+        "video/x-raw,width=" + std::to_string(w) +
+        ",height=" + std::to_string(h) +
+        ",framerate=" + std::to_string(std::max(1, fps)) + "/1 ! "
+        "videoconvert ! "
+        "video/x-raw,format=BGR ! "
+        "appsink drop=true max-buffers=1 sync=false";
+}
+
+bool Camera::openCsiGStreamer_(int device, const std::string& customPipeline)
+{
+    (void)device; // pas utilisé pour la CSI via pipeline
+
+    const std::string pipeline = customPipeline.empty()
+        ? buildDefaultCsiPipeline_(w_, h_, static_cast<int>(fps_))
+        : customPipeline;
+
+    std::cout << "Trying to open camera CSI via GStreamer/libcamerasrc...\n";
+    std::cout << pipeline << std::endl;
+
+    if (!cap_.open(pipeline, cv::CAP_GSTREAMER)) {
+        std::cerr << "Impossible d'ouvrir la camera CSI via GStreamer/libcamerasrc\n";
+        return false;
+    }
+
+    return true;
 }
 
 bool Camera::isOpen() const { return cap_.isOpened();}
@@ -67,13 +135,40 @@ bool Camera::close()
     return false;
 }
 
-bool Camera::startCapture(double fps) {
-    if (!isOpen() || running_)
-    {
-		std::cerr << "Camera non ouverte ou déjà en capture\n";
+bool Camera::startCapture(double fps)
+{
+    if (!isOpen() || running_) {
+        std::cerr << "Camera non ouverte ou déjà en capture\n";
         return false;
     }
+
     fps_ = fps;
+
+    cv::Mat test;
+    bool gotFrame = false;
+    for (int i = 0; i < 10; ++i) {
+        if (cap_.read(test) && !test.empty()) {
+            gotFrame = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (!gotFrame) {
+        std::cerr << "startCapture: première frame vide\n";
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        latest_ = test.clone();
+    }
+
+    std::cout << "startCapture: première frame OK "
+        << test.cols << "x" << test.rows
+        << " channels=" << test.channels()
+        << " type=" << test.type() << std::endl;
+
     running_ = true;
     th_ = std::thread(&Camera::captureLoop_, this);
     return true;
@@ -101,9 +196,14 @@ void Camera::captureLoop_()
     {
         old_time = std::chrono::steady_clock::now();
         cap_ >> frame;
-        if (frame.empty()) continue;
+
+        if (frame.empty()) {
+            std::cerr << "captureLoop_: frame vide\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
         cv::Mat view = frame;
-        
         
         // 1) Si on a calibr�, on peut undistort pour stabiliser les mesures
         if (isCalibrated_ && undistortEnabled_) undistordFrame_(frame, view);

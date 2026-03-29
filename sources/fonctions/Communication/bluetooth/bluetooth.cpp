@@ -160,7 +160,10 @@ namespace CATJ_bluetooth {
             }
         }
         else {
-            addr.rc_bdaddr = *BDADDR_ANY;
+            sockaddr_rc addr{};
+            addr.rc_family = AF_BLUETOOTH;
+            addr.rc_channel = static_cast<uint8_t>(cfg_.channel);
+            std::memset(&addr.rc_bdaddr, 0, sizeof(addr.rc_bdaddr));
         }
 
         if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {

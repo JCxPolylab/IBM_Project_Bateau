@@ -11,12 +11,12 @@
 #define DIR_NAME "IBM_robot_SimuPC"
 
 // Dir raspi Jerry
-/*
+
 #define DIR_NAME_LINUX "IBM_Bateau"
-*/
+
 
 // Dir raspi EPF
-#define DIR_NAME_LINUX "jerryCamera"
+//#define DIR_NAME_LINUX "jerryCamera"
 
 #ifdef WIN32
 #include <windows.h>
@@ -132,9 +132,12 @@ namespace {
 #else
         const char* expectedName = DIR_NAME_LINUX;
 #endif
-
-        while (!exeDir.empty() && exeDir.filename() != expectedName) {
+        while (!exeDir.empty() && exeDir.filename() != expectedName)
+        {
+			std::cout << "dossier path check : " << exeDir.filename() << std::endl;
             exeDir = exeDir.parent_path();
+            if (exeDir.filename().compare("") == 0)
+                break;
         }
         return exeDir;
     }
@@ -177,7 +180,10 @@ namespace {
         std::cout << "Dashboard disponible sur : http://<IP_RASPI>:" << webCfg.port << std::endl;
 
         CATJ_lidar::RplidarC1 lidar;
-        if (lidarEnabled) {
+		std::cout << "activation du LiDAR : " << (lidarEnabled ? "OUI" : "NON") << std::endl;
+        if (lidarEnabled) 
+        {
+            std::cout << "Initialisation du LiDAR..." << std::endl;
             CATJ_lidar::RplidarConfig lidarCfg;
             lidarCfg.port = lidarPort;
             lidarCfg.baudrate = static_cast<std::uint32_t>(std::max(115200, lidarBaud));
@@ -191,13 +197,16 @@ namespace {
                 << (lidarMock ? " (mock forcé)" : "") << std::endl;
         }
 
+		std::cout << "Initialisation de la caméra..." << std::endl;
         if (!cam.startCapture(cam.getFps())) {
             std::cerr << "Impossible de lancer la capture camera" << std::endl;
             bridge.stop();
             return -41;
         }
 
-        if (enableRecording) {
+		std::cout << "enable recording : " << (enableRecording ? "OUI" : "NON") << std::endl;
+        if (enableRecording) 
+        {
             cam.startRecording(recPath, cam.getFps(), codec);
         }
 
@@ -218,9 +227,12 @@ namespace {
 
         auto lastTs = std::chrono::steady_clock::now();
 
-        while (cam.isOpen() && bridge.isRunning()) {
+		std::cout << "Entrée dans la boucle principale. Appuyez sur Ctrl+C pour quitter." << std::endl;
+        while (cam.isOpen() && bridge.isRunning()) 
+        {
             CATJ_robot_web::ControlEvent ev;
-            while (bridge.popControlEvent(ev)) {
+            while (bridge.popControlEvent(ev)) 
+            {
                 if (!ev.accepted) {
                     std::cout << "Commande refusée: " << ev.name << std::endl;
                     continue;
@@ -396,14 +408,17 @@ namespace {
             bridge.updateTelemetry(telem);
             bridge.updateVideoFrame(frame, webDets);
 
-            if (cv::pollKey() == 'q') {
+            if (cv::pollKey() == 'q') 
+            {
                 break;
             }
-
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        if (lidarEnabled) {
+		std::cout << "Arrêt du programme..." << std::endl;
+
+        if (lidarEnabled) 
+        {
             lidar.close();
         }
         bridge.stop();
@@ -457,6 +472,7 @@ int main()
 {
     std::cout << "démarrage du programme" << std::endl;
 
+	std::cout << "Initialisation des variables et objets" << std::endl;
     CATJ_utility::iniReader iniFile;
     CATJ_utility::fs::path prjPath = CATJ_utility::executable_dir();
     CATJ_utility::programme_mode mode = CATJ_utility::programme_mode::unknown;
@@ -475,6 +491,7 @@ int main()
     int valA = 0, valB = 0, valC = 0;
     float fvalA = 0.0f, fvalB = 0.0f;
 
+    std::cout << "Resolve project path : " << prjPath << std::endl;
     prjPath = resolveProjectPath(prjPath);
     if (prjPath.empty()) {
         std::cerr << "Erreur : impossible de trouver le répertoire du projet." << std::endl;
@@ -493,7 +510,14 @@ int main()
     iniFile.get("CAMERA", "device", valA);
     iniFile.get("CAMERA", "width", valB);
     iniFile.get("CAMERA", "height", valC);
-    CATJ_camera::Camera cam(valA, valB, valC);
+    std::string camBackendStr = "auto";
+    iniFile.get("CAMERA", "backend", camBackendStr);
+    std::string customPipeline;
+    iniFile.get("CAMERA", "csi pipeline", customPipeline);
+    CATJ_camera::CameraBackend camBackend =
+        CATJ_camera::cameraBackendFromString(camBackendStr);
+
+    CATJ_camera::Camera cam(valA, valB, valC, camBackend, customPipeline);
 
     iniFile.get("CAMERA", "fps", valA);
     cam.setFps(valA);
@@ -547,19 +571,23 @@ int main()
     iniFile.get("CAMERA", "video ext", imgExt);
     iniFile.get("CAMERA", "recording file path", str);
 
+	std::cout << "Initialisation du timestamp pour le nom de fichier d'enregistrement" << std::endl;
     trimTime.fromStdString(CATJ_utility::now_timestamp());
     trimTime.trim();
 
+    std::cout << "Initialisation du nom de fichier d'enregistrement" << std::endl;
     const std::filesystem::path recDir = prjPath / str;
     const std::filesystem::path recFile = std::string("recording_") + trimTime + "." + imgExt;
     recordingPath = (recDir / recFile).string();
 
+	std::cout << "Enregistrement vidéo : " << (flagRecording ? ("ON, path: " + recordingPath) : "OFF") << std::endl;
+
     const bool needsCalibration = (mode == CATJ_utility::programme_mode::camera)
-        || (mode == CATJ_utility::programme_mode::remote)
         || (mode == CATJ_utility::programme_mode::mesure)
         || (mode == CATJ_utility::programme_mode::debug)
         || (mode == CATJ_utility::programme_mode::calibration);
 
+	std::cout << "Calibration caméra : " << (needsCalibration ? "ON" : "OFF") << std::endl;
     const bool needsDetection = (mode == CATJ_utility::programme_mode::camera)
         || (mode == CATJ_utility::programme_mode::remote);
 
@@ -568,6 +596,7 @@ int main()
     }
 
     if (needsDetection) {
+		std::cout << "Chargement du modèle de détection ONNX" << std::endl;
         iniFile.get("IA", "ONNX model path", str);
         std::filesystem::path modelPath = std::filesystem::path(str).is_absolute()
             ? std::filesystem::path(str)
@@ -576,10 +605,11 @@ int main()
         check_negzerror_ret(std::filesystem::exists(modelPath),
             "ONNX introuvable: " + modelPath.string());
 
-        check_negzerror_ret(cam.loadBallDetectorONNX(modelPath.string(), cam.getOnnx_InputSize()),
-            "Impossible de charger le modèle ONNX: " + modelPath.string());
+        //check_negzerror_ret(cam.loadBallDetectorONNX(modelPath.string(), cam.getOnnx_InputSize()),
+        //    "Impossible de charger le modèle ONNX: " + modelPath.string());
     }
 
+	std::cout << "Mode sélectionné : " << CATJ_utility::modeToStr(mode) << std::endl;
     switch (mode)
     {
     case CATJ_utility::programme_mode::camera:
@@ -613,8 +643,10 @@ int main()
 
         std::cout << "Appuyez sur la touche 'q' pour quitter la calibration\n" << std::endl;
         while (cam.getKeyPolled() != 'q') {
-            while (!cam.getLatestFrame(frame)) {
+            while (!cam.getLatestFrame(frame)) 
+            {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::cerr << "runRemoteWebMode: aucune frame disponible pour l'instant\n";         
             }
 
             if (cam.calibrateCamera(true, objTemplate, frame, &calibOut)) {

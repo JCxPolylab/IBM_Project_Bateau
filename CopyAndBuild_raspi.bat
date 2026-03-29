@@ -6,6 +6,7 @@ set "PROJECT_ROOT=%~dp0"
 set "LIST_FILE=%PROJECT_ROOT%folders_to_copy.txt"
 set "CONFIG_FILE=%PROJECT_ROOT%devConfig.txt"
 
+
 REM ======= CHECKS =======
 if not exist "%CONFIG_FILE%" (
   echo [ERROR] Fichier config introuvable: "%CONFIG_FILE%"
@@ -102,6 +103,7 @@ rem =======================
 rem Options de build
 set "BUILD_TYPE=Release"
 set "USE_ORT=ON"
+set "USE_RPLIDAR=ON"
 
 rem =======================
 rem  CHECK OUTILS
@@ -122,7 +124,7 @@ rem =======================
 ssh -p %PI_PORT% %RASPI_USER%@%RASPI_HOST% ^
   chmod -R u+rwX /home/ibm_bateau/code/jerryCamera/build
   ssh -p %PI_PORT% %RASPI_USER%@%RASPI_HOST% ^
-  "cd %RASPI_DEST% && rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DUSE_ORT=%USE_ORT% && cmake --build build --parallel"
+  "cd %RASPI_DEST% && rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DUSE_RPLIDAR_SDK=%USE_RPLIDAR% -DUSE_ORT=%USE_ORT% && cmake --build build --parallel"
 
 if errorlevel 1 (
   echo.
