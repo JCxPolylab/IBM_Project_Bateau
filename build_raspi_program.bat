@@ -8,7 +8,7 @@ set "CONFIG_FILE=%PROJECT_ROOT%devConfig.txt"
 
 rem Options de build
 set "BUILD_TYPE=Release"
-set "USE_ORT=OFF"
+set "USE_ORT=ON"
 set "USE_RPLIDAR=ON"
 
 rem =======================

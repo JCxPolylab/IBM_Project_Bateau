@@ -24,7 +24,8 @@ if /i "%CONFIG_MODE%"=="EPF" (
 
 ssh %PI_USER%@%PI_HOST% ~/camera_project/venv/code/IBM_Bateau/build/CATJ_ibmRobotProject
 
-PAUSE
+UI
 
+PAUSE
 
 

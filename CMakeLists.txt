@@ -96,30 +96,57 @@ endif()
 # Optional: ONNX Runtime
 # -----------------------------------------------------------------------------
 if(USE_ORT)
-    if(EXISTS "${ORT_ROOT}/onnxruntime_cxx_api.h")
-        target_compile_definitions(CATJ_ibmRobotProject PRIVATE CATJ_USE_ORT=1)
-        target_include_directories(CATJ_ibmRobotProject PRIVATE "${ORT_ROOT}")
 
-        find_library(ONNXRUNTIME_LIB
-            NAMES onnxruntime
-            HINTS "${ORT_ROOT}/lib"
-            NO_DEFAULT_PATH
-        )
+    set(ORT_INCLUDE_HINTS
+        "${ORT_ROOT}"
+        "${ORT_ROOT}/include"
+        "${ORT_ROOT}/include/onnxruntime/core/session"
+        "/usr/local/include"
+        "/usr/local/include/onnxruntime/core/session"
+        "/usr/include"
+        "/usr/include/onnxruntime/core/session"
+    )
 
-        if(NOT ONNXRUNTIME_LIB)
-            message(FATAL_ERROR "USE_ORT=ON but libonnxruntime not found in ${ORT_ROOT}/lib")
-        endif()
+    find_path(ONNXRUNTIME_INCLUDE_DIR
+        NAMES onnxruntime_cxx_api.h
+        HINTS ${ORT_INCLUDE_HINTS}
+    )
 
-        target_link_libraries(CATJ_ibmRobotProject PRIVATE "${ONNXRUNTIME_LIB}")
-        set_target_properties(CATJ_ibmRobotProject PROPERTIES
-            BUILD_RPATH "${ORT_ROOT}/lib"
-            INSTALL_RPATH "${ORT_ROOT}/lib"
-        )
+    set(ORT_LIB_HINTS
+        "${ORT_ROOT}/lib"
+        "${ORT_ROOT}/build/Linux/Release"
+        "${ORT_ROOT}/build/Linux/RelWithDebInfo"
+        "${ORT_ROOT}/build/Release"
+        "/usr/local/lib"
+        "/usr/lib"
+        "/usr/lib/aarch64-linux-gnu"
+    )
 
-        message(STATUS "ONNX Runtime enabled from: ${ORT_ROOT}")
-    else()
-        message(FATAL_ERROR "USE_ORT=ON but onnxruntime_cxx_api.h not found in ${ORT_ROOT}")
+    find_library(ONNXRUNTIME_LIB
+        NAMES onnxruntime
+        HINTS ${ORT_LIB_HINTS}
+    )
+
+    if(NOT ONNXRUNTIME_INCLUDE_DIR)
+        message(FATAL_ERROR "USE_ORT=ON but onnxruntime_cxx_api.h not found. ORT_ROOT=${ORT_ROOT}")
     endif()
+
+    if(NOT ONNXRUNTIME_LIB)
+        message(FATAL_ERROR "USE_ORT=ON but libonnxruntime not found. ORT_ROOT=${ORT_ROOT}")
+    endif()
+
+    target_compile_definitions(CATJ_ibmRobotProject PRIVATE CATJ_USE_ORT=1)
+    target_include_directories(CATJ_ibmRobotProject PRIVATE "${ONNXRUNTIME_INCLUDE_DIR}")
+    target_link_libraries(CATJ_ibmRobotProject PRIVATE "${ONNXRUNTIME_LIB}")
+
+    get_filename_component(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_LIB}" DIRECTORY)
+    set_target_properties(CATJ_ibmRobotProject PROPERTIES
+        BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
+        INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
+    )
+
+    message(STATUS "ONNX Runtime include: ${ONNXRUNTIME_INCLUDE_DIR}")
+    message(STATUS "ONNX Runtime lib: ${ONNXRUNTIME_LIB}")
 endif()
 
 # -----------------------------------------------------------------------------
