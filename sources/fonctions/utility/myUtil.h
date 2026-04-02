@@ -214,7 +214,7 @@ namespace CATJ_utility
         return executable_path().parent_path();
     }
 
-    enum class  programme_mode
+    enum class programme_mode
     {
         unknown,
         course,
@@ -225,31 +225,51 @@ namespace CATJ_utility
         colorsensor,
         gyro,
         navigation,
-        remote,
+        remote,   // legacy: utilisé uniquement pour compat config.ini
         debug,
         mesure,
     };
 
-    inline programme_mode strToMode(const std::string str)
+    inline std::string trim_copy(std::string s)
     {
-        if (str.compare("course") == 0) return programme_mode::course;
-        if (str.compare("ramassage") == 0) return programme_mode::ramassage;
-        if (str.compare("calibration") == 0) return programme_mode::calibration;
-        if (str.compare("camera") == 0) return programme_mode::camera;
-        if (str.compare("lidar") == 0)  return programme_mode::lidar;
-        if (str.compare("colorsensor") == 0) return programme_mode::colorsensor;
-        if (str.compare("gyro") == 0)  return programme_mode::gyro;
-        if (str.compare("navigation") == 0)  return programme_mode::navigation;
-        if (str.compare("remote") == 0)  return programme_mode::remote;
-        if (str.compare("debug") == 0)  return programme_mode::debug;
-		if (str.compare("mesure") == 0)  return programme_mode::mesure;
-        
-		return programme_mode::unknown;
-	}
+        auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        return s;
+    }
 
-    inline std::string modeToStr(const programme_mode mode)
+    inline std::string toLower_copy(std::string s)
     {
-        switch (mode) 
+        std::transform(s.begin(), s.end(), s.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    }
+
+    inline programme_mode strToMode(std::string str)
+    {
+        str = toLower_copy(trim_copy(str));
+
+        // alias éventuels
+        if (str == "measure") str = "mesure";
+
+        if (str == "course") return programme_mode::course;
+        if (str == "ramassage") return programme_mode::ramassage;
+        if (str == "calibration") return programme_mode::calibration;
+        if (str == "camera") return programme_mode::camera;
+        if (str == "lidar") return programme_mode::lidar;
+        if (str == "colorsensor") return programme_mode::colorsensor;
+        if (str == "gyro") return programme_mode::gyro;
+        if (str == "navigation") return programme_mode::navigation;
+        if (str == "remote") return programme_mode::remote;
+        if (str == "debug") return programme_mode::debug;
+        if (str == "mesure") return programme_mode::mesure;
+
+        return programme_mode::unknown;
+    }
+
+    inline std::string modeToStr(programme_mode mode)
+    {
+        switch (mode)
         {
         case programme_mode::course: return "course";
         case programme_mode::ramassage: return "ramassage";
@@ -261,8 +281,12 @@ namespace CATJ_utility
         case programme_mode::navigation: return "navigation";
         case programme_mode::remote: return "remote";
         case programme_mode::debug: return "debug";
+        case programme_mode::mesure: return "mesure";
+        case programme_mode::unknown:
+        default:
+            return "unknown";
         }
-	}
+    }
 
     inline std::string now_timestamp()
     {
@@ -310,5 +334,4 @@ namespace CATJ_utility
             << "Error code: " << code << " | Message: " << msg << "\n";
     }
 
-
-} // namespace CATJ_utility
+}

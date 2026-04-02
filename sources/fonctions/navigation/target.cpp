@@ -6,7 +6,8 @@ CATJ_target::target::target() {
 	std::cout << "Target initialized\n";
 }
 
-CATJ_target::target::~target() {
+CATJ_target::target::~target() 
+{
 	// Libération des ressources
 	std::cout << "Target destroyed\n";
 }

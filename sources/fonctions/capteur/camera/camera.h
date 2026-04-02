@@ -11,11 +11,14 @@
 #include <iostream>
 #include <cmath>
 #ifdef CATJ_USE_ORT
+#include <onnxruntime_cxx_api.h>
+/*
 #ifdef WIN32
         #include <onnxruntime_cxx_api.h>
     #else
         #include <../onnxruntime/onnxruntime_cxx_api.h>
     #endif
+*/
   #include <memory>
   #include <array>
 #endif

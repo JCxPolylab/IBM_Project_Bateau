@@ -2,6 +2,9 @@
 
 #include "../webui/webui_rt.h"
 
+#include "../../Communication/comms_listen/CommsListenService.h"
+#include "gpio_service.h"
+
 #include <mutex>
 #include <queue>
 #include <string>
@@ -116,7 +119,10 @@ enum class ControlEventType {
     StopAll,
     DrivePreset,
     SetRemoteControlEnabled,
-    RawWebCommand
+    RawWebCommand,
+    quitProgram,
+    CommsScan,
+    CommsSend
 };
 
 struct ControlEvent {
@@ -172,6 +178,10 @@ public:
 
 private:
     CATJ_webui_rt::WebUiRtServer web_;
+
+    // "Active listen" helper for UART / Bluetooth / TCP+UDP (WiFi/Ethernet)
+    CATJ_comms_listen::CommsListenService listenService_;
+    CATJ_gpio_web::GpioService gpioService_;
 
     mutable std::mutex stateMutex_;
     RobotTelemetry telemetry_{};

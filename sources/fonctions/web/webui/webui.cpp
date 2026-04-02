@@ -23,6 +23,7 @@
     #include <sys/select.h>
     #include <sys/socket.h>
     #include <unistd.h>
+    #include <signal.h>
 #endif
 
 namespace CATJ_webui {
@@ -52,6 +53,11 @@ namespace CATJ_webui {
     {
         stop();
         cfg_ = cfg;
+
+#if !defined(_WIN32)
+        // Prevent process termination on send() to a closed socket.
+        ::signal(SIGPIPE, SIG_IGN);
+#endif
 
         if (!createListenSocket_()) {
             return false;
@@ -653,7 +659,11 @@ namespace CATJ_webui {
 #if defined(_WIN32)
             int n = ::send(static_cast<SOCKET>(sock), all.data() + sent, static_cast<int>(all.size() - sent), 0);
 #else
-            int n = static_cast<int>(::send(sock, all.data() + sent, all.size() - sent, 0));
+            int flags = 0;
+            #ifdef MSG_NOSIGNAL
+                flags |= MSG_NOSIGNAL;
+            #endif
+            int n = static_cast<int>(::send(sock, all.data() + sent, all.size() - sent, flags));
 #endif
             if (n <= 0) {
                 return false;

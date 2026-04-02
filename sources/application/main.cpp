@@ -1,19 +1,23 @@
 #include "main.h"
 #include "../fonctions/web/robotOverlay/robot_web_bridge.h"
 #include "../fonctions/capteur/lidar/Lidar.h"
+#include "../fonctions/Communication/comms/comms_manager.h"
+#include "../fonctions/Communication/I2C/I2C.h"
+#include "../fonctions/Communication/SPI/SPI.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <unordered_map>
+#include <iomanip>
 
-#define DIR_NAME "IBM_robot_SimuPC"
+#define DIR_NAME "IBM_Project_Bateau"
 
 // Dir raspi Jerry
-
 #define DIR_NAME_LINUX "IBM_Bateau"
-
 
 // Dir raspi EPF
 //#define DIR_NAME_LINUX "jerryCamera"
@@ -22,7 +26,6 @@
 #include <windows.h>
 #endif
 
-// Déclaration des variables globales historiques du projet
 bool flagRecording = false;
 bool showImage = false;
 int vKey = 0;
@@ -125,6 +128,165 @@ namespace {
         out.points = convertLidarPoints(snap.points, webMaxPoints);
     }
 
+
+
+    static int hexVal_(char c)
+    {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+        if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+        return -1;
+    }
+
+    static std::string urlDecode_(const std::string& in)
+    {
+        std::string out;
+        out.reserve(in.size());
+        for (size_t i = 0; i < in.size(); ++i) {
+            const char c = in[i];
+            if (c == '+') { out.push_back(' '); continue; }
+            if (c == '%' && i + 2 < in.size()) {
+                const int hi = hexVal_(in[i + 1]);
+                const int lo = hexVal_(in[i + 2]);
+                if (hi >= 0 && lo >= 0) {
+                    out.push_back(static_cast<char>((hi << 4) | lo));
+                    i += 2;
+                    continue;
+                }
+            }
+            out.push_back(c);
+        }
+        return out;
+    }
+
+    static std::unordered_map<std::string, std::string> parseUrlEncoded_(const std::string& body)
+    {
+        std::unordered_map<std::string, std::string> out;
+        size_t start = 0;
+        while (start < body.size()) {
+            size_t amp = body.find('&', start);
+            if (amp == std::string::npos) amp = body.size();
+            const std::string pair = body.substr(start, amp - start);
+            const size_t eq = pair.find('=');
+            std::string k = (eq == std::string::npos) ? pair : pair.substr(0, eq);
+            std::string v = (eq == std::string::npos) ? "" : pair.substr(eq + 1);
+            k = urlDecode_(k);
+            v = urlDecode_(v);
+            if (!k.empty()) out[k] = v;
+            start = amp + 1;
+        }
+        return out;
+    }
+
+    static uint32_t parseU32Loose_(std::string s, uint32_t fallback)
+    {
+        try {
+            s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c) != 0; }), s.end());
+            int base = 10;
+            if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0) { s = s.substr(2); base = 16; }
+            return static_cast<uint32_t>(std::stoul(s, nullptr, base));
+        } catch (...) { return fallback; }
+    }
+
+    static std::string hex8_(uint32_t v)
+    {
+        std::ostringstream oss;
+        oss << "0x" << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << (v & 0xFFu);
+        return oss.str();
+    }
+
+    static std::string hex16_(uint32_t v)
+    {
+        std::ostringstream oss;
+        oss << "0x" << std::uppercase << std::hex << std::setw(4) << std::setfill('0') << (v & 0xFFFFu);
+        return oss.str();
+    }
+
+
+    static bool parseI2cSpecMain_(const std::string& spec, std::string& outDev, uint16_t& outAddr)
+    {
+        std::string s = spec;
+        s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c) != 0; }), s.end());
+        if (s.empty()) return false;
+        outDev = "/dev/i2c-1";
+        outAddr = 0x42;
+        const auto at = s.find('@');
+        if (at == std::string::npos) { outDev = s; return true; }
+        outDev = s.substr(0, at);
+        std::string a = s.substr(at + 1);
+        try {
+            int base = 10;
+            if (a.rfind("0x", 0) == 0 || a.rfind("0X", 0) == 0) { a = a.substr(2); base = 16; }
+            outAddr = static_cast<uint16_t>(std::stoul(a, nullptr, base));
+        } catch (...) { return false; }
+        return !outDev.empty();
+    }
+
+    static bool parseSpiSpecMain_(const std::string& spec, std::string& outDev, uint32_t& outSpeed, uint8_t& outMode, uint8_t& outBits)
+    {
+        std::string s = spec;
+        s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c) != 0; }), s.end());
+        if (s.empty()) return false;
+        outDev = "/dev/spidev0.0";
+        outSpeed = 1000000;
+        outMode = 0;
+        outBits = 8;
+        const auto at = s.find('@');
+        if (at == std::string::npos) { outDev = s; return true; }
+        outDev = s.substr(0, at);
+        std::string rest = s.substr(at + 1);
+        std::string speedPart = rest, modePart, bitsPart;
+        const auto hash = rest.find('#');
+        if (hash != std::string::npos) {
+            speedPart = rest.substr(0, hash);
+            const auto plus = rest.find('+', hash + 1);
+            if (plus == std::string::npos) modePart = rest.substr(hash + 1);
+            else {
+                modePart = rest.substr(hash + 1, plus - (hash + 1));
+                bitsPart = rest.substr(plus + 1);
+            }
+        }
+        try { if (!speedPart.empty()) outSpeed = static_cast<uint32_t>(std::stoul(speedPart)); } catch (...) {}
+        try { if (!modePart.empty()) outMode = static_cast<uint8_t>(std::stoi(modePart)); } catch (...) {}
+        try { if (!bitsPart.empty()) outBits = static_cast<uint8_t>(std::stoi(bitsPart)); } catch (...) {}
+        outMode = std::min<uint8_t>(outMode, 3);
+        if (outBits == 0) outBits = 8;
+        return !outDev.empty();
+    }
+
+    static bool parseHexBytesMain_(const std::string& text, std::vector<uint8_t>& out)
+    {
+        out.clear();
+        std::string s = text;
+        for (char& c : s) if (c == ',' || c == ';' || c == ':') c = ' ';
+        std::istringstream iss(s);
+        std::string tok;
+        while (iss >> tok) {
+            if (tok.rfind("0x", 0) == 0 || tok.rfind("0X", 0) == 0) tok = tok.substr(2);
+            if (tok.size() == 1) tok = "0" + tok;
+            if (tok.size() != 2) return false;
+            const int hi = hexVal_(tok[0]);
+            const int lo = hexVal_(tok[1]);
+            if (hi < 0 || lo < 0) return false;
+            out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+        }
+        return !out.empty();
+    }
+
+    static std::string bytesToHexMain_(const uint8_t* data, size_t n)
+    {
+        static const char* kHex = "0123456789ABCDEF";
+        std::string out;
+        out.reserve(n * 3);
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t b = data[i];
+            out.push_back(kHex[(b >> 4) & 0xF]);
+            out.push_back(kHex[b & 0xF]);
+            if (i + 1 < n) out.push_back(' ');
+        }
+        return out;
+    }
+
     CATJ_utility::fs::path resolveProjectPath(CATJ_utility::fs::path exeDir)
     {
 #ifdef WIN32
@@ -134,7 +296,7 @@ namespace {
 #endif
         while (!exeDir.empty() && exeDir.filename() != expectedName)
         {
-			std::cout << "dossier path check : " << exeDir.filename() << std::endl;
+            std::cout << "dossier path check : " << exeDir.filename() << std::endl;
             exeDir = exeDir.parent_path();
             if (exeDir.filename().compare("") == 0)
                 break;
@@ -145,13 +307,25 @@ namespace {
     int runRemoteWebMode(const std::filesystem::path& prjPath,
         CATJ_utility::iniReader& iniFile,
         CATJ_camera::Camera& cam,
+        CATJ_utility::programme_mode baseMode,
         bool enableRecording,
         const std::string& recPath,
         const std::string& codec)
     {
+        // --- WEB ---
         int webPort = 8080;
         iniFile.get("WEB", "port", webPort);
 
+        const bool allowNetworkControl = iniFile.getOr("WEB", "allow network control", true);
+        const int telemetryPeriodMs = iniFile.getOr("WEB", "telemetry period ms", 100);
+        const int jpegQuality = iniFile.getOr("WEB", "jpeg quality", 80);
+
+        // stream camera : permet un remote LIDAR only sans dépendre de la caméra.
+        // vision enabled : active / désactive la détection + overlay.
+        const bool streamCamera = iniFile.getOr("WEB", "stream camera", true);
+        const bool visionEnabled = iniFile.getOr("WEB", "vision enabled", (baseMode == CATJ_utility::programme_mode::camera));
+
+        // --- LIDAR ---
         const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
         const std::string lidarPort = iniFile.getOr<std::string>("LIDAR", "port", "/dev/ttyUSB0");
         const int lidarBaud = iniFile.getOr("LIDAR", "baudrate", 460800);
@@ -165,11 +339,11 @@ namespace {
         CATJ_webui_rt::WebUiRtConfig webCfg;
         webCfg.bindAddress = "0.0.0.0";
         webCfg.port = static_cast<uint16_t>(std::clamp(webPort, 1, 65535));
-        webCfg.documentRoot = (prjPath / "sources" / "fonctions" / "web" / "frontend" / "robot_web_demo").string();
+        webCfg.documentRoot = (prjPath / "sources" / "fonctions" / "web" / "frontend" / "view").string();
         webCfg.indexFile = "index.html";
-        webCfg.telemetryPeriodMs = 100;
-        webCfg.jpegQuality = 80;
-        webCfg.allowNetworkControl = true;
+        webCfg.telemetryPeriodMs = telemetryPeriodMs;
+        webCfg.jpegQuality = jpegQuality;
+        webCfg.allowNetworkControl = allowNetworkControl;
 
         CATJ_robot_web::RobotWebBridge bridge;
         if (!bridge.start(webCfg, webCfg.documentRoot)) {
@@ -177,11 +351,354 @@ namespace {
             return -40;
         }
 
-        std::cout << "Dashboard disponible sur : http://<IP_RASPI>:" << webCfg.port << std::endl;
+        std::cout << "Dashboard disponible sur : http://" << "raspberrypi:" << webCfg.port << std::endl;
+
+        // --- COMMS (UART / Bluetooth / WiFi / RJ45) ---
+        CATJ_comms::CommsManager comms;
+        {
+            std::string commsErr;
+            const auto commsIni = prjPath / "parametres" / "motherboard_trame.ini";
+            if (!comms.loadIni(commsIni, &commsErr)) {
+                std::cerr << "[COMMS] " << commsErr << std::endl;
+            } else {
+                std::cout << "[COMMS] Presets chargés: " << commsIni << std::endl;
+            }
+        }
+
+        // API pour la page Comms (chargement config + historique + scan)
+        bridge.server().registerGet("/api/comms_config", [&](const CATJ_webui_rt::HttpRequest&) {
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = comms.configJson();
+            return r;
+        });
+
+        bridge.server().registerGet("/api/comms_history", [&](const CATJ_webui_rt::HttpRequest& req) {
+            size_t limit = 200;
+            if (auto it = req.query.find("limit"); it != req.query.end()) {
+                try { limit = static_cast<size_t>(std::stoul(it->second)); } catch (...) {}
+                limit = std::clamp<size_t>(limit, 10, 2000);
+            }
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = comms.historyJson(limit);
+            return r;
+        });
+
+        bridge.server().registerGet("/api/system_profile", [&](const CATJ_webui_rt::HttpRequest&) {
+            const auto esc = CATJ_webui_rt::WebUiRtServer::jsonEscape;
+
+            const std::string camReference = iniFile.getOr<std::string>("CAMERA", "reference", "");
+            const int camDevice = iniFile.getOr("CAMERA", "device", 0);
+            const int camWidth = iniFile.getOr("CAMERA", "width", 0);
+            const int camHeight = iniFile.getOr("CAMERA", "height", 0);
+            const int camFps = iniFile.getOr("CAMERA", "fps", 0);
+            const int camAiFps = iniFile.getOr("CAMERA", "Aifps", 0);
+            const std::string camBackend = iniFile.getOr<std::string>("CAMERA", "backend", "auto");
+            const bool camShowImage = iniFile.getOr("CAMERA", "show image", false);
+            const bool camRecording = iniFile.getOr("CAMERA", "flag recording", false);
+            const std::string camRecordingPathIni = iniFile.getOr<std::string>("CAMERA", "recording file path", "");
+
+            const float scoreThreshold = iniFile.getOr("CAMERA", "score threshold", 0.45f);
+            const float nmsThreshold = iniFile.getOr("CAMERA", "non maximum suppression threshold", 0.35f);
+
+            std::string onnxModel = iniFile.getOr<std::string>("IA", "ONNX model path", "");
+            if (!onnxModel.empty()) {
+                std::filesystem::path modelPath = std::filesystem::path(onnxModel).is_absolute()
+                    ? std::filesystem::path(onnxModel)
+                    : (prjPath / onnxModel);
+                onnxModel = modelPath.lexically_normal().string();
+            }
+
+            std::ostringstream js;
+            js << std::fixed << std::setprecision(2);
+            js << '{';
+            js << "\"ok\":true,";
+            js << "\"base_mode\":\"" << esc(CATJ_utility::modeToStr(baseMode)) << "\",";
+            js << "\"stream_camera\":" << (streamCamera ? "true" : "false") << ',';
+            js << "\"vision_enabled\":" << (visionEnabled ? "true" : "false") << ',';
+            js << "\"overlay_default\":true,";
+            js << "\"allow_network_control\":" << (allowNetworkControl ? "true" : "false") << ',';
+            js << "\"telemetry_period_ms\":" << telemetryPeriodMs << ',';
+            js << "\"jpeg_quality\":" << jpegQuality << ',';
+            js << "\"image_codec\":\"" << esc(codec) << "\",";
+
+            js << "\"camera\":{";
+            js << "\"reference\":\"" << esc(camReference) << "\",";
+            js << "\"device\":" << camDevice << ',';
+            js << "\"width\":" << camWidth << ',';
+            js << "\"height\":" << camHeight << ',';
+            js << "\"fps\":" << camFps << ',';
+            js << "\"ai_fps\":" << camAiFps << ',';
+            js << "\"backend\":\"" << esc(camBackend) << "\",";
+            js << "\"show_image\":" << (camShowImage ? "true" : "false") << ',';
+            js << "\"recording_enabled\":" << (camRecording ? "true" : "false") << ',';
+            js << "\"recording_path\":\"" << esc(!recordingPath.empty() ? recordingPath : camRecordingPathIni) << "\"";
+            js << "},";
+
+            js << "\"vision\":{";
+            js << "\"onnx_model\":\"" << esc(onnxModel) << "\",";
+            js << "\"score_threshold\":" << scoreThreshold << ',';
+            js << "\"nms_threshold\":" << nmsThreshold;
+            js << "},";
+
+            js << "\"lidar\":{";
+            js << "\"enabled\":" << (lidarEnabled ? "true" : "false") << ',';
+            js << "\"port\":\"" << esc(lidarPort) << "\",";
+            js << "\"baudrate\":" << lidarBaud << ',';
+            js << "\"mock\":" << (lidarMock ? "true" : "false") << ',';
+            js << "\"web_max_points\":" << lidarWebMaxPoints << ',';
+            js << "\"max_distance_mm\":" << lidarMaxDistMm << ',';
+            js << "\"avoid_distance_mm\":" << lidarAvoidMm;
+            js << '}';
+
+            js << '}';
+
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = js.str();
+            return r;
+        });
+
+        auto doScan = [&]() {
+            std::string scanErr;
+            comms.refreshDevices(&scanErr);
+            // broadcast du nouveau listing (si une page Comms est déjà ouverte)
+            bridge.server().broadcastJsonEnvelope("comms_config", comms.configJson());
+            if (!scanErr.empty()) {
+                const auto msg = CATJ_webui_rt::WebUiRtServer::jsonEscape(scanErr);
+                bridge.server().broadcastText(std::string("{\"type\":\"error\",\"message\":\"") + msg + "\"}");
+            } else {
+                bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"COMMS scan OK\"}");
+            }
+        };
+
+        bridge.server().registerPost("/api/comms_scan", [&](const CATJ_webui_rt::HttpRequest&) {
+            doScan();
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = comms.configJson();
+            return r;
+        });
+
+        bridge.server().registerGet("/api/comms_scan", [&](const CATJ_webui_rt::HttpRequest&) {
+            doScan();
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = comms.configJson();
+            return r;
+        });
+
+        // Broadcast config au démarrage (utile si la page est déjà connectée)
+        bridge.server().broadcastJsonEnvelope("comms_config", comms.configJson());
+
+
+        // -----------------------------------------------------------------
+        // Dedicated Bus API: I2C address scan + register read/write + SPI reg R/W
+        // -----------------------------------------------------------------
+        bridge.server().registerGet("/api/bus_i2c_scan", [&](const CATJ_webui_rt::HttpRequest& req) {
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+
+            const std::string dev = [&]() {
+                auto it = req.query.find("device");
+                return (it == req.query.end() || it->second.empty()) ? std::string("/dev/i2c-1") : it->second;
+            }();
+            const int a0 = [&]() { auto it = req.query.find("start"); return it == req.query.end() ? 0x03 : (int)parseU32Loose_(it->second, 0x03); }();
+            const int a1 = [&]() { auto it = req.query.find("end");   return it == req.query.end() ? 0x77 : (int)parseU32Loose_(it->second, 0x77); }();
+
+            std::ostringstream js;
+            js << "{\"ok\":";
+#if defined(_WIN32)
+            js << "false,\"error\":\"I2C scan unsupported on Windows\"}";
+#else
+            js << "true,\"device\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(dev) << "\",\"addresses\":[";
+            bool first = true;
+            for (int addr = std::max(0x03, a0); addr <= std::min(0x77, a1); ++addr) {
+                CATJ_i2c::I2cConfig ic;
+                ic.device = dev;
+                ic.slaveAddress = static_cast<uint16_t>(addr);
+                ic.timeoutMs = 30;
+                CATJ_i2c::I2cDevice d;
+                if (!d.open(ic)) continue;
+                uint8_t tmp = 0;
+                bool ok = d.writeThenRead(nullptr, 0, &tmp, 1);
+                if (!ok) {
+                    // Some devices NACK reads but still exist. Try a zero-byte-like probe via reg write 0x00.
+                    const uint8_t z = 0;
+                    ok = (d.writeBytes(&z, 1) >= 0);
+                }
+                d.close();
+                if (!ok) continue;
+                if (!first) js << ',';
+                first = false;
+                js << "{\"addr\":" << addr << ",\"hex\":\"" << hex8_(static_cast<uint32_t>(addr)) << "\"}";
+            }
+            js << "]}";
+#endif
+            r.body = js.str();
+            return r;
+        });
+
+        bridge.server().registerPost("/api/bus_i2c_reg_read", [&](const CATJ_webui_rt::HttpRequest& req) {
+            const auto f = parseUrlEncoded_(req.body);
+            const std::string deviceSpec = f.count("device_spec") ? f.at("device_spec") : std::string("/dev/i2c-1@0x42");
+            const uint32_t reg = parseU32Loose_(f.count("reg") ? f.at("reg") : "0", 0);
+            const size_t size = static_cast<size_t>(std::clamp<int>((int)parseU32Loose_(f.count("size") ? f.at("size") : "1", 1), 1, 256));
+
+            CATJ_webui_rt::HttpResponse r;
+            r.contentType = "application/json; charset=utf-8";
+#if defined(_WIN32)
+            r.status = 400;
+            r.body = "{\"ok\":false,\"error\":\"I2C unsupported on Windows\"}";
+#else
+            std::string dev = "/dev/i2c-1"; uint16_t addr = 0x42;
+            if (!parseI2cSpecMain_(deviceSpec, dev, addr)) {
+                r.status = 400; r.body = "{\"ok\":false,\"error\":\"bad i2c spec\"}"; return r;
+            }
+            CATJ_i2c::I2cConfig ic; ic.device = dev; ic.slaveAddress = addr; ic.timeoutMs = 80;
+            CATJ_i2c::I2cDevice d;
+            if (!d.open(ic)) {
+                r.status = 400; r.body = "{\"ok\":false,\"error\":\"I2C open failed\"}"; return r;
+            }
+            std::vector<uint8_t> rx; bool ok = d.readBlock(static_cast<uint8_t>(reg & 0xFFu), rx, size); d.close();
+            if (!ok) {
+                r.status = 400; r.body = "{\"ok\":false,\"error\":\"I2C register read failed\"}"; return r;
+            }
+            std::ostringstream js;
+            js << "{\"ok\":true,\"device_spec\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(deviceSpec)
+               << "\",\"reg\":\"" << hex8_(reg) << "\",\"hex\":\"" << bytesToHexMain_(rx.data(), rx.size())
+               << "\",\"ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(std::string(rx.begin(), rx.end())) << "\"}";
+            r.body = js.str();
+#endif
+            return r;
+        });
+
+        bridge.server().registerPost("/api/bus_i2c_reg_write", [&](const CATJ_webui_rt::HttpRequest& req) {
+            const auto f = parseUrlEncoded_(req.body);
+            const std::string deviceSpec = f.count("device_spec") ? f.at("device_spec") : std::string("/dev/i2c-1@0x42");
+            const uint32_t reg = parseU32Loose_(f.count("reg") ? f.at("reg") : "0", 0);
+            const std::string payload = f.count("payload") ? f.at("payload") : std::string();
+            const std::string encoding = f.count("encoding") ? f.at("encoding") : std::string("hex");
+            CATJ_webui_rt::HttpResponse r; r.contentType = "application/json; charset=utf-8";
+#if defined(_WIN32)
+            r.status = 400; r.body = "{\"ok\":false,\"error\":\"I2C unsupported on Windows\"}";
+#else
+            std::string dev = "/dev/i2c-1"; uint16_t addr = 0x42;
+            if (!parseI2cSpecMain_(deviceSpec, dev, addr)) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"bad i2c spec\"}"; return r; }
+            std::vector<uint8_t> tx;
+            bool okEnc = false;
+            if (!encoding.empty() && (encoding == "hex" || encoding == "HEX")) okEnc = parseHexBytesMain_(payload, tx);
+            else { std::string s = payload; tx.assign(s.begin(), s.end()); okEnc = true; }
+            if (!okEnc) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"bad payload encoding\"}"; return r; }
+            CATJ_i2c::I2cConfig ic; ic.device = dev; ic.slaveAddress = addr; ic.timeoutMs = 80;
+            CATJ_i2c::I2cDevice d; if (!d.open(ic)) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"I2C open failed\"}"; return r; }
+            const bool ok = d.writeBlock(static_cast<uint8_t>(reg & 0xFFu), tx); d.close();
+            r.status = ok ? 200 : 400;
+            r.body = ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"I2C register write failed\"}";
+#endif
+            return r;
+        });
+
+        bridge.server().registerPost("/api/bus_spi_reg_read", [&](const CATJ_webui_rt::HttpRequest& req) {
+            const auto f = parseUrlEncoded_(req.body);
+            const std::string deviceSpec = f.count("device_spec") ? f.at("device_spec") : std::string("/dev/spidev0.0@1000000#0+8");
+            const uint32_t reg = parseU32Loose_(f.count("reg") ? f.at("reg") : "0", 0);
+            const size_t size = static_cast<size_t>(std::clamp<int>((int)parseU32Loose_(f.count("size") ? f.at("size") : "1", 1), 1, 256));
+            const int regWidth = std::clamp<int>((int)parseU32Loose_(f.count("reg_width") ? f.at("reg_width") : "8", 8), 8, 16);
+            CATJ_webui_rt::HttpResponse r; r.contentType = "application/json; charset=utf-8";
+#if defined(_WIN32)
+            r.status = 400; r.body = "{\"ok\":false,\"error\":\"SPI unsupported on Windows\"}";
+#else
+            std::string dev = "/dev/spidev0.0"; uint32_t speed = 1000000; uint8_t mode = 0, bits = 8;
+            if (!parseSpiSpecMain_(deviceSpec, dev, speed, mode, bits)) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"bad spi spec\"}"; return r; }
+            CATJ_spi::SpiConfig sc; sc.device = dev; sc.speedHz = speed; sc.mode = mode; sc.bitsPerWord = bits;
+            CATJ_spi::SpiDevice d; if (!d.open(sc)) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"SPI open failed\"}"; return r; }
+            std::vector<uint8_t> rx; bool ok = false;
+            if (regWidth <= 8) ok = d.readRegisterBlock8(static_cast<uint8_t>(reg & 0xFFu), rx, size);
+            else ok = d.readRegisterBlock16(static_cast<uint16_t>(reg & 0xFFFFu), rx, size);
+            d.close();
+            if (!ok) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"SPI register read failed\"}"; return r; }
+            std::ostringstream js;
+            js << "{\"ok\":true,\"device_spec\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(deviceSpec)
+               << "\",\"reg\":\"" << (regWidth <= 8 ? hex8_(reg) : hex16_(reg)) << "\",\"hex\":\"" << bytesToHexMain_(rx.data(), rx.size())
+               << "\",\"ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(std::string(rx.begin(), rx.end())) << "\"}";
+            r.body = js.str();
+#endif
+            return r;
+        });
+
+        bridge.server().registerPost("/api/bus_spi_reg_write", [&](const CATJ_webui_rt::HttpRequest& req) {
+            const auto f = parseUrlEncoded_(req.body);
+            const std::string deviceSpec = f.count("device_spec") ? f.at("device_spec") : std::string("/dev/spidev0.0@1000000#0+8");
+            const uint32_t reg = parseU32Loose_(f.count("reg") ? f.at("reg") : "0", 0);
+            const int regWidth = std::clamp<int>((int)parseU32Loose_(f.count("reg_width") ? f.at("reg_width") : "8", 8), 8, 16);
+            const std::string payload = f.count("payload") ? f.at("payload") : std::string();
+            const std::string encoding = f.count("encoding") ? f.at("encoding") : std::string("hex");
+            CATJ_webui_rt::HttpResponse r; r.contentType = "application/json; charset=utf-8";
+#if defined(_WIN32)
+            r.status = 400; r.body = "{\"ok\":false,\"error\":\"SPI unsupported on Windows\"}";
+#else
+            std::string dev = "/dev/spidev0.0"; uint32_t speed = 1000000; uint8_t mode = 0, bits = 8;
+            if (!parseSpiSpecMain_(deviceSpec, dev, speed, mode, bits)) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"bad spi spec\"}"; return r; }
+            std::vector<uint8_t> tx;
+            bool okEnc = false;
+            if (!encoding.empty() && (encoding == "hex" || encoding == "HEX")) okEnc = parseHexBytesMain_(payload, tx);
+            else { std::string s = payload; tx.assign(s.begin(), s.end()); okEnc = true; }
+            if (!okEnc) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"bad payload encoding\"}"; return r; }
+            CATJ_spi::SpiConfig sc; sc.device = dev; sc.speedHz = speed; sc.mode = mode; sc.bitsPerWord = bits;
+            CATJ_spi::SpiDevice d; if (!d.open(sc)) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"SPI open failed\"}"; return r; }
+            bool ok = false;
+            if (regWidth <= 8) ok = d.writeRegisterBlock8(static_cast<uint8_t>(reg & 0xFFu), tx);
+            else ok = d.writeRegisterBlock16(static_cast<uint16_t>(reg & 0xFFFFu), tx);
+            d.close();
+            r.status = ok ? 200 : 400;
+            r.body = ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"SPI register write failed\"}";
+#endif
+            return r;
+        });
+
+        bridge.server().registerPost("/api/bus_raw_transfer", [&](const CATJ_webui_rt::HttpRequest& req) {
+            const auto f = parseUrlEncoded_(req.body);
+            CATJ_comms::SendRequest sreq;
+            std::string transport = f.count("transport") ? f.at("transport") : std::string("i2c");
+            for (auto& c : transport) c = (char)std::tolower((unsigned char)c);
+            if (transport == "spi") sreq.transport = CATJ_comms::Transport::Spi;
+            else sreq.transport = CATJ_comms::Transport::I2c;
+            sreq.deviceSpec = f.count("device_spec") ? f.at("device_spec") : "";
+            sreq.payload = f.count("payload") ? f.at("payload") : "";
+            sreq.encoding = f.count("encoding") ? f.at("encoding") : "hex";
+            sreq.appendNewline = false;
+            CATJ_comms::ReplyOptions ro;
+            ro.expectReply = true;
+            ro.mode = "bytes";
+            ro.timeoutMs = std::clamp((int)parseU32Loose_(f.count("timeout_ms") ? f.at("timeout_ms") : "200", 200), 10, 5000);
+            ro.maxBytes = static_cast<size_t>(std::clamp<int>((int)parseU32Loose_(f.count("max_bytes") ? f.at("max_bytes") : "64", 64), 1, 4096));
+            ro.clearRxBeforeSend = false;
+            const auto rr = comms.sendEx(sreq, ro);
+            CATJ_webui_rt::HttpResponse r; r.contentType = "application/json; charset=utf-8";
+            if (!rr.ok) {
+                r.status = 400;
+                r.body = std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(rr.error) + "\"}";
+            } else {
+                std::ostringstream js;
+                js << "{\"ok\":true,\"reply_hex\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(rr.replyHex)
+                   << "\",\"reply_ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(rr.replyAscii) << "\"}";
+                r.body = js.str();
+            }
+            return r;
+        });
 
         CATJ_lidar::RplidarC1 lidar;
-		std::cout << "activation du LiDAR : " << (lidarEnabled ? "OUI" : "NON") << std::endl;
-        if (lidarEnabled) 
+        bool lidarOk = false;
+        std::cout << "activation du LiDAR : " << (lidarEnabled ? "OUI" : "NON") << std::endl;
+        if (lidarEnabled)
         {
             std::cout << "Initialisation du LiDAR..." << std::endl;
             CATJ_lidar::RplidarConfig lidarCfg;
@@ -191,30 +708,58 @@ namespace {
             lidarCfg.maxDistanceMm = lidarMaxDistMm;
             lidarCfg.frontHalfAngleDeg = lidarFrontHalfDeg;
             lidarCfg.lateralHalfAngleDeg = lidarLateralHalfDeg;
-            lidar.open(lidarCfg);
-            lidar.startScan();
+
+            lidarOk = lidar.open(lidarCfg);
+            if (lidarOk) {
+                lidarOk = lidar.startScan();
+            }
+
             std::cout << "LiDAR initialisé sur " << lidarPort << " @" << lidarBaud << " bauds"
                 << (lidarMock ? " (mock forcé)" : "") << std::endl;
         }
 
-		std::cout << "Initialisation de la caméra..." << std::endl;
-        if (!cam.startCapture(cam.getFps())) {
-            std::cerr << "Impossible de lancer la capture camera" << std::endl;
-            bridge.stop();
-            return -41;
+        bool camOk = false;
+        if (streamCamera) {
+            std::cout << "Initialisation de la caméra..." << std::endl;
+            camOk = cam.startCapture(cam.getFps());
+            if (!camOk) {
+                std::cerr << "Impossible de lancer la capture camera" << std::endl;
+
+                const bool cameraRequired =
+                    (baseMode == CATJ_utility::programme_mode::camera) ||
+                    (baseMode == CATJ_utility::programme_mode::calibration) ||
+                    (baseMode == CATJ_utility::programme_mode::mesure) ||
+                    (baseMode == CATJ_utility::programme_mode::debug);
+
+                if (cameraRequired) {
+                    if (lidarEnabled) lidar.close();
+                    bridge.stop();
+                    return -41;
+                }
+            }
+
+            std::cout << "enable recording : " << (enableRecording ? "OUI" : "NON") << std::endl;
+            if (enableRecording && camOk)
+            {
+                cam.startRecording(recPath, cam.getFps(), codec);
+            }
+        }
+        else {
+            std::cout << "Initialisation de la caméra... SKIP (WEB.stream camera = false)" << std::endl;
         }
 
-		std::cout << "enable recording : " << (enableRecording ? "OUI" : "NON") << std::endl;
-        if (enableRecording) 
-        {
-            cam.startRecording(recPath, cam.getFps(), codec);
+        std::vector<cv::Point3f> calibObjTemplate;
+        if (baseMode == CATJ_utility::programme_mode::calibration) {
+            calibObjTemplate = cam.makeChessboard3D(cam.getEchiquierSizeCalibration(),
+                cam.getSquareSizeCalibration());
         }
+        cv::Mat calibOut;
 
         CATJ_robot_web::RobotTelemetry telem;
         telem.mode = CATJ_robot_web::RobotMode::Manual;
         telem.overlayEnabled = true;
-        telem.remoteControlEnabled = true;
-        telem.statusText = "remote ready";
+        telem.remoteControlEnabled = allowNetworkControl;
+        telem.statusText = std::string("remote: ") + CATJ_utility::modeToStr(baseMode);
         telem.autoState = "idle";
         telem.lidar.enabled = lidarEnabled;
         bridge.updateTelemetry(telem);
@@ -227,11 +772,14 @@ namespace {
 
         auto lastTs = std::chrono::steady_clock::now();
 
-		std::cout << "Entrée dans la boucle principale. Appuyez sur Ctrl+C pour quitter." << std::endl;
-        while (cam.isOpen() && bridge.isRunning()) 
+        std::cout << "Entrée dans la boucle principale. Appuyez sur Ctrl+C pour quitter." << std::endl;
+
+        bool shouldQuit = false;
+
+        while (bridge.isRunning() && !shouldQuit)
         {
             CATJ_robot_web::ControlEvent ev;
-            while (bridge.popControlEvent(ev)) 
+            while (bridge.popControlEvent(ev))
             {
                 if (!ev.accepted) {
                     std::cout << "Commande refusée: " << ev.name << std::endl;
@@ -303,22 +851,118 @@ namespace {
                     }
                     break;
 
+
+                case CATJ_robot_web::ControlEventType::CommsScan: {
+                    // Scan devices (UART/BT) + broadcast config
+                    doScan();
+                    break;
+                }
+
+                case CATJ_robot_web::ControlEventType::CommsSend: {
+                    // Envoi de trame depuis l'UI web (comms.html)
+                    auto getS = [&](const char* k) -> std::string {
+                        auto it = ev.rawFields.find(k);
+                        return (it != ev.rawFields.end()) ? it->second : std::string();
+                    };
+                    auto getI = [&](const char* k, int def) -> int {
+                        auto it = ev.rawFields.find(k);
+                        if (it == ev.rawFields.end()) return def;
+                        try { return std::stoi(it->second); } catch (...) { return def; }
+                    };
+                    auto getB = [&](const char* k, bool def) -> bool {
+                        auto it = ev.rawFields.find(k);
+                        if (it == ev.rawFields.end()) return def;
+                        std::string v = it->second;
+                        for (auto& c : v) c = (char)std::tolower((unsigned char)c);
+                        v.erase(std::remove_if(v.begin(), v.end(), ::isspace), v.end());
+                        if (v == "1" || v == "true" || v == "yes" || v == "on") return true;
+                        if (v == "0" || v == "false" || v == "no" || v == "off") return false;
+                        return def;
+                    };
+
+                    std::string transport = getS("transport");
+                    for (auto& c : transport) c = (char)std::tolower((unsigned char)c);
+                    const std::string device = getS("device");
+                    const std::string payload = getS("payload");
+                    std::string encoding = getS("encoding");
+                    if (encoding.empty()) encoding = "ascii";
+                    for (auto& c : encoding) c = (char)std::tolower((unsigned char)c);
+                    const bool appendNl = getB("append_nl", false);
+
+                    CATJ_comms::SendRequest req;
+                    req.deviceSpec = device;
+                    req.payload = payload;
+                    req.encoding = encoding;
+                    req.appendNewline = appendNl;
+
+                    if (transport == "usb") req.transport = CATJ_comms::Transport::Usb;
+                    else if (transport == "bluetooth" || transport == "bt") req.transport = CATJ_comms::Transport::Bluetooth;
+                    else if (transport == "wifi") req.transport = CATJ_comms::Transport::Wifi;
+                    else if (transport == "ethernet" || transport == "rj45") req.transport = CATJ_comms::Transport::Ethernet;
+                    else if (transport == "i2c") req.transport = CATJ_comms::Transport::I2c;
+                    else if (transport == "spi") req.transport = CATJ_comms::Transport::Spi;
+                    else req.transport = CATJ_comms::Transport::Uart;
+
+                    CATJ_comms::ReplyOptions ro;
+                    ro.expectReply = getB("expect_reply", false);
+                    ro.mode = getS("reply_mode");
+                    if (ro.mode.empty()) ro.mode = "line";
+                    ro.timeoutMs = std::clamp(getI("timeout_ms", 250), 10, 5000);
+                    ro.maxBytes = (size_t)std::clamp(getI("max_bytes", 512), 16, 8192);
+                    ro.clearRxBeforeSend = getB("clear_rx", true);
+
+                    auto r = comms.sendEx(req, ro);
+                    if (!r.ok) {
+                        const auto msg = CATJ_webui_rt::WebUiRtServer::jsonEscape(r.error);
+                        bridge.server().broadcastText(std::string("{\"type\":\"error\",\"message\":\"COMMS send failed: ") + msg + "\"}");
+                    } else {
+                        bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"COMMS send OK\"}");
+                        // Push last RX immediately (history est aussi dispo via /api/comms_history)
+                        if (r.haveReply) {
+                            std::ostringstream js;
+                            js << "{\"transport\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(transport)
+                               << "\",\"device\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(device)
+                               << "\",\"reply_ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(r.replyAscii)
+                               << "\",\"reply_hex\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(r.replyHex)
+                               << "\"}";
+                            bridge.server().broadcastJsonEnvelope("comms_rx", js.str());
+                        }
+                        // broadcast config/histo optional
+                    }
+                    break;
+                }
+                case CATJ_robot_web::ControlEventType::quitProgram:
+                    std::cout << "ControlEventType : quitProgram" << std::endl;
+                    shouldQuit = true;
+                    break;
+
                 case CATJ_robot_web::ControlEventType::SetRemoteControlEnabled:
                 case CATJ_robot_web::ControlEventType::RawWebCommand:
                 default:
                     break;
                 }
+
+                if (shouldQuit) break;
             }
 
             cv::Mat frame;
-            if (!cam.getLatestFrame(frame)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
+            bool haveFrame = false;
+            if (streamCamera && camOk) {
+                haveFrame = cam.getLatestFrame(frame);
             }
 
-            std::vector<CATJ_camera::BallDetection> dets;
-            cam.detectBalls(dets);
-            const auto webDets = convertDetections(dets);
+            if (haveFrame && baseMode == CATJ_utility::programme_mode::calibration && !calibObjTemplate.empty()) {
+                if (cam.calibrateCamera(true, calibObjTemplate, frame, &calibOut) && !calibOut.empty()) {
+                    frame = calibOut;
+                }
+            }
+
+            std::vector<CATJ_robot_web::Detection> webDets;
+            if (haveFrame && visionEnabled) {
+                std::vector<CATJ_camera::BallDetection> dets;
+                cam.detectBalls(dets);
+                webDets = convertDetections(dets);
+            }
 
             telem = bridge.telemetry();
             telem.lidar.enabled = lidarEnabled;
@@ -330,6 +974,7 @@ namespace {
                 telem.vision.fps = 1.0 / dt;
             }
 
+            // TODO: brancher IMU/compas ici
             telem.compass.headingDeg = 0.0;
             telem.compass.magneticNorthDeg = 0.0;
             telem.imu.rollDeg = 0.0;
@@ -341,8 +986,13 @@ namespace {
             telem.imu.gyroZ_dps = 0.0;
             telem.batteryV = 0.0;
 
-            if (lidarEnabled) {
-                fillWebLidarTelemetry(telem.lidar, lidar.snapshot(), static_cast<std::size_t>(std::max(16, lidarWebMaxPoints)), lidarMaxDistMm);
+            if (lidarEnabled && lidarOk) {
+                fillWebLidarTelemetry(
+                    telem.lidar,
+                    lidar.snapshot(),
+                    static_cast<std::size_t>(std::max(16, lidarWebMaxPoints)),
+                    lidarMaxDistMm
+                );
             }
 
             if (!webDets.empty()) {
@@ -356,7 +1006,7 @@ namespace {
                 telem.vision.confidence = 0.0;
             }
 
-            if (telem.mode == CATJ_robot_web::RobotMode::Auto) {
+            if (baseMode == CATJ_utility::programme_mode::camera && telem.mode == CATJ_robot_web::RobotMode::Auto) {
                 telem.autoEngaged = true;
                 telem.autoState = "tracking";
 
@@ -372,7 +1022,7 @@ namespace {
                     telem.statusText = "auto lidar avoidance";
                     telem.autoState = goLeft ? "avoid left" : "avoid right";
                 }
-                else if (!webDets.empty() && telem.missionEnabled) {
+                else if (!webDets.empty() && telem.missionEnabled && haveFrame) {
                     const auto& best = *std::max_element(webDets.begin(), webDets.end(),
                         [](const auto& a, const auto& b) { return a.confidence < b.confidence; });
 
@@ -406,19 +1056,18 @@ namespace {
             }
 
             bridge.updateTelemetry(telem);
-            bridge.updateVideoFrame(frame, webDets);
 
-            if (cv::pollKey() == 'q') 
-            {
-                break;
+            if (haveFrame) {
+                if (visionEnabled) bridge.updateVideoFrame(frame, webDets);
+                else bridge.updateVideoFrame(frame);
             }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-		std::cout << "Arrêt du programme..." << std::endl;
+        std::cout << "Arrêt du programme..." << std::endl;
 
-        if (lidarEnabled) 
-        {
+        if (lidarEnabled) {
             lidar.close();
         }
         bridge.stop();
@@ -472,7 +1121,7 @@ int main()
 {
     std::cout << "démarrage du programme" << std::endl;
 
-	std::cout << "Initialisation des variables et objets" << std::endl;
+    std::cout << "Initialisation des variables et objets" << std::endl;
     CATJ_utility::iniReader iniFile;
     CATJ_utility::fs::path prjPath = CATJ_utility::executable_dir();
     CATJ_utility::programme_mode mode = CATJ_utility::programme_mode::unknown;
@@ -506,14 +1155,35 @@ int main()
     iniFile.get("GENERAL", "programme mode", str);
     mode = CATJ_utility::strToMode(str);
 
+	//mode camera par défaut si non spécifié, pour compatibilité avec les anciennes config.ini
+    bool remoteEnabled = iniFile.getOr("WEB", "remote", false);
+
+    if (mode == CATJ_utility::programme_mode::remote) {
+        remoteEnabled = true;
+
+        const std::string baseStr = iniFile.getOr<std::string>("GENERAL", "remote base mode", "camera");
+        auto baseMode = CATJ_utility::strToMode(baseStr);
+        if (baseMode == CATJ_utility::programme_mode::unknown ||
+            baseMode == CATJ_utility::programme_mode::remote) {
+            baseMode = CATJ_utility::programme_mode::camera;
+        }
+
+        std::cout << "Mode legacy 'remote' détecté. Base mode => "
+            << CATJ_utility::modeToStr(baseMode) << std::endl;
+
+        mode = baseMode;
+    }
+
     iniFile.get("CAMERA", "reference", str);
     iniFile.get("CAMERA", "device", valA);
     iniFile.get("CAMERA", "width", valB);
     iniFile.get("CAMERA", "height", valC);
+
     std::string camBackendStr = "auto";
     iniFile.get("CAMERA", "backend", camBackendStr);
     std::string customPipeline;
     iniFile.get("CAMERA", "csi pipeline", customPipeline);
+
     CATJ_camera::CameraBackend camBackend =
         CATJ_camera::cameraBackendFromString(camBackendStr);
 
@@ -571,7 +1241,7 @@ int main()
     iniFile.get("CAMERA", "video ext", imgExt);
     iniFile.get("CAMERA", "recording file path", str);
 
-	std::cout << "Initialisation du timestamp pour le nom de fichier d'enregistrement" << std::endl;
+    std::cout << "Initialisation du timestamp pour le nom de fichier d'enregistrement" << std::endl;
     trimTime.fromStdString(CATJ_utility::now_timestamp());
     trimTime.trim();
 
@@ -580,23 +1250,25 @@ int main()
     const std::filesystem::path recFile = std::string("recording_") + trimTime + "." + imgExt;
     recordingPath = (recDir / recFile).string();
 
-	std::cout << "Enregistrement vidéo : " << (flagRecording ? ("ON, path: " + recordingPath) : "OFF") << std::endl;
+    std::cout << "Enregistrement vidéo : " << (flagRecording ? ("ON, path: " + recordingPath) : "OFF") << std::endl;
 
     const bool needsCalibration = (mode == CATJ_utility::programme_mode::camera)
         || (mode == CATJ_utility::programme_mode::mesure)
         || (mode == CATJ_utility::programme_mode::debug)
         || (mode == CATJ_utility::programme_mode::calibration);
 
-	std::cout << "Calibration caméra : " << (needsCalibration ? "ON" : "OFF") << std::endl;
+    std::cout << "Calibration caméra : " << (needsCalibration ? "ON" : "OFF") << std::endl;
+
+    const bool webVisionEnabled = iniFile.getOr("WEB", "vision enabled", (mode == CATJ_utility::programme_mode::camera));
     const bool needsDetection = (mode == CATJ_utility::programme_mode::camera)
-        || (mode == CATJ_utility::programme_mode::remote);
+        || (remoteEnabled && webVisionEnabled);
 
     if (needsCalibration) {
         cam.loadCalibration(cam.getcalibPath());
     }
 
     if (needsDetection) {
-		std::cout << "Chargement du modèle de détection ONNX" << std::endl;
+        std::cout << "Chargement du modèle de détection ONNX" << std::endl;
         iniFile.get("IA", "ONNX model path", str);
         std::filesystem::path modelPath = std::filesystem::path(str).is_absolute()
             ? std::filesystem::path(str)
@@ -609,7 +1281,14 @@ int main()
         //    "Impossible de charger le modèle ONNX: " + modelPath.string());
     }
 
-	std::cout << "Mode sélectionné : " << CATJ_utility::modeToStr(mode) << std::endl;
+    std::cout << "Mode sélectionné : " << CATJ_utility::modeToStr(mode)
+        << " | remote=" << (remoteEnabled ? "ON" : "OFF") << std::endl;
+
+    if (remoteEnabled) {
+        std::cout << "Remote activé => démarrage de l'interface web" << std::endl;
+        return runRemoteWebMode(prjPath, iniFile, cam, mode, flagRecording, recordingPath, imgCodec);
+    }
+
     switch (mode)
     {
     case CATJ_utility::programme_mode::camera:
@@ -643,10 +1322,10 @@ int main()
 
         std::cout << "Appuyez sur la touche 'q' pour quitter la calibration\n" << std::endl;
         while (cam.getKeyPolled() != 'q') {
-            while (!cam.getLatestFrame(frame)) 
+            while (!cam.getLatestFrame(frame))
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                std::cerr << "runRemoteWebMode: aucune frame disponible pour l'instant\n";         
+                std::cerr << "Mode calibration: aucune frame disponible pour l'instant\n";
             }
 
             if (cam.calibrateCamera(true, objTemplate, frame, &calibOut)) {
@@ -685,10 +1364,6 @@ int main()
         std::cout << "Mode NAVIGATION\n";
         break;
 
-    case CATJ_utility::programme_mode::remote:
-        std::cout << "Mode REMOTE\n";
-        return runRemoteWebMode(prjPath, iniFile, cam, flagRecording, recordingPath, imgCodec);
-
     case CATJ_utility::programme_mode::mesure:
         std::cout << "Mode MESURE\n";
         cam.startCapture(cam.getFps());
@@ -722,11 +1397,18 @@ int main()
         }
         break;
 
+    case CATJ_utility::programme_mode::remote:
+        // Ne devrait plus arriver: remote est géré comme un flag + compat dans le parsing.
+        std::cout << "Mode REMOTE (legacy)\n";
+        return runRemoteWebMode(prjPath, iniFile, cam, CATJ_utility::programme_mode::camera, flagRecording, recordingPath, imgCodec);
+
     case CATJ_utility::programme_mode::unknown:
         set_error(-20, "Mode inconnu dans le config.ini\n");
+        break;
 
     default:
         set_error(-30, "Mode inconnu dans le config.ini\n");
+        break;
     }
 
     return 0;

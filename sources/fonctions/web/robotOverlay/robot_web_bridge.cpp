@@ -72,6 +72,72 @@ std::string fmm(float v)
     return oss.str();
 }
 
+// Minimal x-www-form-urlencoded parser for our small REST endpoints.
+static std::string urlDecode_(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '+') { out.push_back(' '); continue; }
+        if (c == '%' && i + 2 < s.size()) {
+            auto hex = [](char h) -> int {
+                if (h >= '0' && h <= '9') return h - '0';
+                if (h >= 'a' && h <= 'f') return 10 + (h - 'a');
+                if (h >= 'A' && h <= 'F') return 10 + (h - 'A');
+                return -1;
+            };
+            int hi = hex(s[i + 1]);
+            int lo = hex(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back((char)((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
+static std::unordered_map<std::string, std::string> parseUrlEncoded_(const std::string& body)
+{
+    std::unordered_map<std::string, std::string> out;
+    size_t start = 0;
+    while (start < body.size()) {
+        size_t amp = body.find('&', start);
+        if (amp == std::string::npos) amp = body.size();
+        const std::string pair = body.substr(start, amp - start);
+        size_t eq = pair.find('=');
+        std::string k = (eq == std::string::npos) ? pair : pair.substr(0, eq);
+        std::string v = (eq == std::string::npos) ? "" : pair.substr(eq + 1);
+        k = urlDecode_(k);
+        v = urlDecode_(v);
+        if (!k.empty()) out[k] = v;
+        start = amp + 1;
+    }
+    return out;
+}
+
+static bool toBoolField_(const std::unordered_map<std::string, std::string>& f,
+                         const std::string& k,
+                         bool fallback)
+{
+    auto it = f.find(k);
+    if (it == f.end()) return fallback;
+    const std::string v = trimLowerCopy(it->second);
+    return (v == "1" || v == "true" || v == "on" || v == "yes");
+}
+
+static int toIntField_(const std::unordered_map<std::string, std::string>& f,
+                       const std::string& k,
+                       int fallback)
+{
+    auto it = f.find(k);
+    if (it == f.end()) return fallback;
+    try { return std::stoi(it->second); } catch (...) { return fallback; }
+}
+
 } // namespace
 
 RobotWebBridge::RobotWebBridge()
@@ -96,6 +162,9 @@ bool RobotWebBridge::start(const CATJ_webui_rt::WebUiRtConfig& cfg,
 
 void RobotWebBridge::stop()
 {
+    // Ensure we stop background services before stopping the web server.
+    gpioService_.stopAll();
+    listenService_.stop();
     web_.stop();
 }
 
@@ -210,6 +279,205 @@ void RobotWebBridge::setupWebBindings_()
         res.body = buildTelemetryJson_();
         return res;
     });
+
+    // =====================================================================
+    //  COMMS "ACTIVE LISTEN" (UART / Bluetooth / WiFi / Ethernet)
+    //  This is meant as a debug tool: receive frames and optionally auto-reply.
+    // =====================================================================
+    listenService_.setEventCallback([this](const CATJ_comms_listen::ListenEvent& ev) {
+        auto esc = [](const std::string& s) { return CATJ_webui_rt::WebUiRtServer::jsonEscape(s); };
+        std::ostringstream payload;
+        payload << "{";
+        payload << "\"ts_ms\":" << ev.tsMs << ",";
+        payload << "\"dir\":\"" << esc(ev.dir) << "\",";
+        payload << "\"transport\":\"" << esc(ev.transport) << "\",";
+        payload << "\"device\":\"" << esc(ev.device) << "\",";
+        payload << "\"encoding\":\"" << esc(ev.encoding) << "\",";
+        payload << "\"data\":\"" << esc(ev.data) << "\"";
+        payload << "}";
+
+        web_.broadcastJsonEnvelope("comms_event", payload.str());
+    });
+
+    web_.registerGet("/api/comms_listen_scan", [](const CATJ_webui_rt::HttpRequest&) {
+        CATJ_webui_rt::HttpResponse res;
+        res.contentType = "application/json; charset=utf-8";
+        res.body = CATJ_comms_listen::CommsListenService::scanJson();
+        return res;
+    });
+
+    web_.registerGet("/api/comms_listen_status", [this](const CATJ_webui_rt::HttpRequest&) {
+        CATJ_webui_rt::HttpResponse res;
+        res.contentType = "application/json; charset=utf-8";
+        res.body = listenService_.statusJson();
+        return res;
+    });
+
+    web_.registerPost("/api/comms_listen_stop", [this](const CATJ_webui_rt::HttpRequest&) {
+        listenService_.stop();
+        CATJ_webui_rt::HttpResponse res;
+        res.contentType = "application/json; charset=utf-8";
+        res.body = "{\"ok\":true}";
+        return res;
+    });
+
+    web_.registerPost("/api/comms_listen_start", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto fields = parseUrlEncoded_(req.body);
+
+        CATJ_comms_listen::ListenRequest lr;
+        const std::string transport = fields.count("transport") ? trimLowerCopy(fields.at("transport")) : "uart";
+        if (transport == "usb") lr.transport = CATJ_comms_listen::Transport::Usb;
+        else if (transport == "bluetooth" || transport == "bt") lr.transport = CATJ_comms_listen::Transport::Bluetooth;
+        else if (transport == "wifi" || transport == "tcp" || transport == "udp" || transport == "net") lr.transport = CATJ_comms_listen::Transport::Wifi;
+        else if (transport == "ethernet" || transport == "rj45") lr.transport = CATJ_comms_listen::Transport::Ethernet;
+        else if (transport == "i2c") lr.transport = CATJ_comms_listen::Transport::I2c;
+        else if (transport == "spi") lr.transport = CATJ_comms_listen::Transport::Spi;
+        else lr.transport = CATJ_comms_listen::Transport::Uart;
+
+        lr.deviceSpec = fields.count("device") ? fields.at("device") : "";
+        lr.rxMode = fields.count("rx_mode") ? trimLowerCopy(fields.at("rx_mode")) : "bytes";
+        lr.pollTimeoutMs = std::clamp(toIntField_(fields, "poll_ms", 80), 5, 2000);
+        lr.maxBytes = (size_t)std::clamp(toIntField_(fields, "max_bytes", 512), 1, 8192);
+        lr.autoReply = toBoolField_(fields, "auto_reply", false);
+        lr.echoReply = toBoolField_(fields, "echo_reply", false);
+        lr.replyPayload = fields.count("reply_payload") ? fields.at("reply_payload") : "ACK";
+        lr.replyEncoding = fields.count("reply_encoding") ? trimLowerCopy(fields.at("reply_encoding")) : "ascii";
+        // Front-end key is "reply_append_nl" (compat: also accept "reply_newline").
+        lr.replyAppendNewline = toBoolField_(fields, "reply_append_nl",
+                                            toBoolField_(fields, "reply_newline", true));
+        lr.pollTxPayload = fields.count("poll_tx_payload") ? fields.at("poll_tx_payload") : "";
+        lr.pollTxEncoding = fields.count("poll_tx_encoding") ? trimLowerCopy(fields.at("poll_tx_encoding")) : "hex";
+        lr.pollIntervalMs = std::clamp(toIntField_(fields, "poll_interval_ms", 250), 20, 5000);
+
+        std::string err;
+        const bool ok = listenService_.start(lr, &err);
+
+        CATJ_webui_rt::HttpResponse res;
+        res.contentType = "application/json; charset=utf-8";
+        if (!ok) {
+            res.status = 400;
+            res.body = "{\"ok\":false,\"error\":\"" + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}";
+        } else {
+            res.body = "{\"ok\":true}";
+        }
+        return res;
+    });
+
+    // =====================================================================
+    //  GPIO control / sampling (Linux sysfs best-effort)
+    // =====================================================================
+    gpioService_.setEventCallback([this](const CATJ_gpio_web::GpioEvent& ev) {
+        auto esc = [](const std::string& s) { return CATJ_webui_rt::WebUiRtServer::jsonEscape(s); };
+        std::ostringstream payload;
+        payload << "{";
+        payload << "\"ts_ms\":" << ev.tsMs << ",";
+        payload << "\"pin\":" << ev.pin << ",";
+        payload << "\"kind\":\"" << esc(ev.kind) << "\",";
+        payload << "\"message\":\"" << esc(ev.message) << "\",";
+        payload << "\"value\":" << ev.value;
+        payload << "}";
+        web_.broadcastJsonEnvelope("gpio_event", payload.str());
+    });
+
+    web_.registerGet("/api/gpio_status", [this](const CATJ_webui_rt::HttpRequest&) {
+        CATJ_webui_rt::HttpResponse res;
+        res.contentType = "application/json; charset=utf-8";
+        res.body = gpioService_.statusJson();
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_mode", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        const std::string mode = f.count("mode") ? trimLowerCopy(f.at("mode")) : "input";
+        std::string err;
+        const bool ok = gpioService_.configurePin(pin, mode, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        res.status = ok ? 200 : 400;
+        res.body = ok ? "{\"ok\":true}" : (std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}");
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_write", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        const int value = toIntField_(f, "value", 0);
+        std::string err;
+        const bool ok = gpioService_.writePin(pin, value, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        res.status = ok ? 200 : 400;
+        res.body = ok ? "{\"ok\":true}" : (std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}");
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_read", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        int v = 0; std::string err;
+        const bool ok = gpioService_.readPin(pin, &v, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        if (ok) { res.body = std::string("{\"ok\":true,\"value\":") + std::to_string(v) + "}"; }
+        else { res.status = 400; res.body = std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}"; }
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_pwm_start", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        const double freq = (double)toIntField_(f, "freq_hz", 50);
+        const double duty = (double)toIntField_(f, "duty_pct", 50);
+        std::string err;
+        const bool ok = gpioService_.startPwm(pin, freq, duty, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        res.status = ok ? 200 : 400;
+        res.body = ok ? "{\"ok\":true}" : (std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}");
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_pwm_update", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        const double freq = (double)toIntField_(f, "freq_hz", 50);
+        const double duty = (double)toIntField_(f, "duty_pct", 50);
+        std::string err;
+        const bool ok = gpioService_.updatePwm(pin, freq, duty, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        res.status = ok ? 200 : 400;
+        res.body = ok ? "{\"ok\":true}" : (std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}");
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_pwm_stop", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        std::string err;
+        gpioService_.stopPwm(pin, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        res.body = "{\"ok\":true}";
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_sample_start", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        const double hz = (double)toIntField_(f, "hz", 5);
+        std::string err;
+        const bool ok = gpioService_.startSampling(pin, hz, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        res.status = ok ? 200 : 400;
+        res.body = ok ? "{\"ok\":true}" : (std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}");
+        return res;
+    });
+
+    web_.registerPost("/api/gpio_sample_stop", [this](const CATJ_webui_rt::HttpRequest& req) {
+        const auto f = parseUrlEncoded_(req.body);
+        const int pin = toIntField_(f, "pin", -1);
+        std::string err;
+        gpioService_.stopSampling(pin, &err);
+        CATJ_webui_rt::HttpResponse res; res.contentType = "application/json; charset=utf-8";
+        res.body = "{\"ok\":true}";
+        return res;
+    });
 }
 
 void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
@@ -238,7 +506,11 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         return;
     }
 
-    if (ev.action == "mode_set") {
+    /*========================================================================================*/
+    /*                                  EVENT TABLE                                           */   
+    /*========================================================================================*/
+    if (ev.action == "mode_set") 
+    {
         const std::string mode = ev.fields.count("mode") ? trimLowerCopy(ev.fields.at("mode")) : "manual";
         out.type = ControlEventType::SetMode;
         out.name = mode;
@@ -253,7 +525,8 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
                 : "manual mode engaged";
         }
     }
-    else if (ev.action == "mission") {
+    else if (ev.action == "mission") 
+    {
         const std::string cmd = ev.fields.count("cmd") ? trimLowerCopy(ev.fields.at("cmd")) : "";
         out.type = ControlEventType::Mission;
         out.name = cmd;
@@ -357,7 +630,30 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         if (out.name == "brightRange") telemetry_.camera.brightness = out.valueA;
         if (out.name == "contrastRange") telemetry_.camera.contrast = out.valueA;
     }
+    else if (ev.action == "programme")
+    {
+        std::cout << "action : " << ev.action << std::endl;
+        const std::string cmd = ev.fields.count("cmd") ? trimLowerCopy(ev.fields.at("cmd")) : "";
+
+        if (cmd == "stop")
+        {
+            out.type = ControlEventType::quitProgram;
+            std::cout << "STOP programme" << std::endl;
+            std::lock_guard<std::mutex> lock(stateMutex_);
+        }
+    }
+    else if (ev.action == "camera")
+    {
+        const std::string cmd = ev.fields.count("cmd") ? trimLowerCopy(ev.fields.at("cmd")) : "";
+        if (cmd == "calibration")
+        {
+            out.type = ControlEventType::CameraSetting;
+            out.name = "calibration";
+			std::cout << "Camera calibration requested" << std::endl;
+        }
+    }
     else {
+		std::cout << "unknown web command: " << ev.action << std::endl;
         out.type = ControlEventType::RawWebCommand;
         out.name = ev.action;
     }

@@ -1,180 +1,533 @@
-const wsUrl = `ws://${window.location.host}/ws`;
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const qs = (selector) => Array.from(document.querySelectorAll(selector));
 
-const ui = {
-    wsBadge: document.getElementById('wsBadge'),
-    modeBadge: document.getElementById('modeBadge'),
-    missionBadge: document.getElementById('missionBadge'),
-    overlayBadge: document.getElementById('overlayBadge'),
-    lidarBadge: document.getElementById('lidarBadge'),
-    statusText: document.getElementById('statusText'),
-    autoState: document.getElementById('autoState'),
-    targetVal: document.getElementById('targetVal'),
-    fpsVal: document.getElementById('fpsVal'),
-    batteryVal: document.getElementById('batteryVal'),
-    headingVal: document.getElementById('headingVal'),
-    northVal: document.getElementById('northVal'),
-    rollVal: document.getElementById('rollVal'),
-    pitchVal: document.getElementById('pitchVal'),
-    yawVal: document.getElementById('yawVal'),
-    gyroVecVal: document.getElementById('gyroVecVal'),
-    lidarStatusVal: document.getElementById('lidarStatusVal'),
-    lidarHzVal: document.getElementById('lidarHzVal'),
-    lidarSamplesVal: document.getElementById('lidarSamplesVal'),
-    lidarFrontVal: document.getElementById('lidarFrontVal'),
-    lidarFrontRightVal: document.getElementById('lidarFrontRightVal'),
-    lidarRightVal: document.getElementById('lidarRightVal'),
-    lidarRearVal: document.getElementById('lidarRearVal'),
-    lidarLeftVal: document.getElementById('lidarLeftVal'),
-    lidarFrontLeftVal: document.getElementById('lidarFrontLeftVal'),
-    leftThruster: document.getElementById('leftThruster'),
-    rightThruster: document.getElementById('rightThruster'),
-    conveyor: document.getElementById('conveyor'),
-    leftThrusterValue: document.getElementById('leftThrusterValue'),
-    rightThrusterValue: document.getElementById('rightThrusterValue'),
-    conveyorValue: document.getElementById('conveyorValue'),
-    camPanVal: document.getElementById('camPanVal'),
-    camTiltVal: document.getElementById('camTiltVal'),
-    expRange: document.getElementById('expRange'),
-    brightRange: document.getElementById('brightRange'),
-    contrastRange: document.getElementById('contrastRange'),
-    manualLockBanner: document.getElementById('manualLockBanner'),
-    logBox: document.getElementById('logBox'),
-    detectionsBox: document.getElementById('detectionsBox'),
-    videoFeed: document.getElementById('videoFeed'),
-    compassCanvas: document.getElementById('compassCanvas'),
-    gyroCanvas: document.getElementById('gyroCanvas'),
-    lidarCanvas: document.getElementById('lidarCanvas')
-};
+  const ui = {
+    wsBadge: $('wsBadge'),
+    modeBadge: $('modeBadge'),
+    missionBadge: $('missionBadge'),
+    overlayBadge: $('overlayBadge'),
+    lidarBadge: $('lidarBadge'),
 
-let ws = null;
-let currentMode = 'manual';
-let manualLocked = false;
-let lastLidarPoints = [];
-let lastLidarMaxDistance = 8000;
+    statusText: $('statusText'),
+    autoState: $('autoState'),
+    targetVal: $('targetVal'),
+    fpsVal: $('fpsVal'),
+    batteryVal: $('batteryVal'),
 
-function logLine(msg) {
+    headingVal: $('headingVal'),
+    northVal: $('northVal'),
+    rollVal: $('rollVal'),
+    pitchVal: $('pitchVal'),
+    yawVal: $('yawVal'),
+    gyroVecVal: $('gyroVecVal'),
+
+    lidarStatusVal: $('lidarStatusVal'),
+    lidarHzVal: $('lidarHzVal'),
+    lidarSamplesVal: $('lidarSamplesVal'),
+    lidarFrontVal: $('lidarFrontVal'),
+    lidarFrontRightVal: $('lidarFrontRightVal'),
+    lidarRightVal: $('lidarRightVal'),
+    lidarRearVal: $('lidarRearVal'),
+    lidarLeftVal: $('lidarLeftVal'),
+    lidarFrontLeftVal: $('lidarFrontLeftVal'),
+
+    leftThruster: $('leftThruster'),
+    rightThruster: $('rightThruster'),
+    conveyor: $('conveyor'),
+    leftThrusterValue: $('leftThrusterValue'),
+    rightThrusterValue: $('rightThrusterValue'),
+    conveyorValue: $('conveyorValue'),
+    camPanVal: $('camPanVal'),
+    camTiltVal: $('camTiltVal'),
+
+    expRange: $('expRange'),
+    brightRange: $('brightRange'),
+    contrastRange: $('contrastRange'),
+
+    manualLockBanner: $('manualLockBanner'),
+    logBox: $('logBox'),
+    detectionsBox: $('detectionsBox'),
+    videoFeed: $('videoFeed'),
+    compassCanvas: $('compassCanvas'),
+    gyroCanvas: $('gyroCanvas'),
+    lidarCanvas: $('lidarCanvas'),
+
+    // Profile / configuration fields
+    profileBaseMode: $('profileBaseMode'),
+    profileStreamCamera: $('profileStreamCamera'),
+    profileVisionEnabled: $('profileVisionEnabled'),
+    profileOverlayDefault: $('profileOverlayDefault'),
+    profileNetworkControl: $('profileNetworkControl'),
+    profileTelemetryPeriod: $('profileTelemetryPeriod'),
+    profileJpegQuality: $('profileJpegQuality'),
+
+    profileCameraBackend: $('profileCameraBackend'),
+    profileCameraDevice: $('profileCameraDevice'),
+    profileCameraReference: $('profileCameraReference'),
+    profileCameraResolution: $('profileCameraResolution'),
+    profileCameraFps: $('profileCameraFps'),
+    profileAiFps: $('profileAiFps'),
+    profileCameraShowImage: $('profileCameraShowImage'),
+    profileCameraRecording: $('profileCameraRecording'),
+    profileRecordingPath: $('profileRecordingPath'),
+    profileCodec: $('profileCodec'),
+    profileOnnxModel: $('profileOnnxModel'),
+    profileScoreThreshold: $('profileScoreThreshold'),
+    profileNmsThreshold: $('profileNmsThreshold'),
+
+    profileLidarEnabled: $('profileLidarEnabled'),
+    profileLidarPort: $('profileLidarPort'),
+    profileLidarBaud: $('profileLidarBaud'),
+    profileLidarMock: $('profileLidarMock'),
+    profileLidarMaxDistance: $('profileLidarMaxDistance'),
+    profileLidarAvoidDistance: $('profileLidarAvoidDistance'),
+    profileLidarWebPoints: $('profileLidarWebPoints'),
+
+    detectionCountVal: $('detectionCountVal'),
+    primaryDetectionVal: $('primaryDetectionVal'),
+    confidenceVal: $('confidenceVal'),
+    videoResolutionLive: $('videoResolutionLive'),
+    videoResolutionLiveDuplicate: $('videoResolutionLiveDuplicate'),
+
+    speedHudVal: $('speedHudVal'),
+    turnHudVal: $('turnHudVal'),
+    driveStateVal: $('driveStateVal'),
+    headingMiniVal: $('headingMiniVal'),
+    leftPowerBar: $('leftPowerBar'),
+    rightPowerBar: $('rightPowerBar'),
+    conveyorPowerBar: $('conveyorPowerBar'),
+    avgThrustVal: $('avgThrustVal'),
+    diffThrustVal: $('diffThrustVal'),
+    videoHeadingVal: $('videoHeadingVal'),
+    videoModeMini: $('videoModeMini'),
+    videoMissionMini: $('videoMissionMini'),
+    northValDuplicate: $('northValDuplicate'),
+    modeInfoVal: $('modeInfoVal'),
+    missionInfoVal: $('missionInfoVal'),
+    overlayInfoVal: $('overlayInfoVal'),
+    trackingVal: $('trackingVal'),
+  };
+
+  const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+  let ws = null;
+  let reconnectTimer = null;
+  let currentMode = 'manual';
+  let manualLocked = false;
+  let lastLidarPoints = [];
+  let lastLidarMaxDistance = 8000;
+  let lastTelemetry = null;
+  let systemProfile = null;
+  let keyboardDriveActive = false;
+  const activeKeys = new Set();
+
+  function has(el) {
+    return !!el;
+  }
+
+  function setText(el, value) {
+    if (!el) return;
+    el.textContent = value;
+  }
+
+  function setHtml(el, value) {
+    if (!el) return;
+    el.innerHTML = value;
+  }
+
+  function setValue(el, value) {
+    if (!el) return;
+    el.value = value;
+  }
+
+  function clamp(v, min, max) {
+    return Math.min(max, Math.max(min, v));
+  }
+
+  function signedPercentText(v) {
+    if (!Number.isFinite(v)) return '--';
+    const n = Math.round(v);
+    return `${n > 0 ? '+' : ''}${n} %`;
+  }
+
+  function setPowerBar(el, value) {
+    if (!el) return;
+    const v = clamp(Number(value) || 0, -100, 100);
+    const width = `${Math.abs(v) / 2}%`;
+    el.style.width = width;
+    el.style.left = v >= 0 ? '50%' : `${50 - Math.abs(v) / 2}%`;
+  }
+
+  function computeDriveState(left, right) {
+    if (Math.abs(left) < 2 && Math.abs(right) < 2) return 'Idle';
+    if (left > 0 && right > 0) return 'Forward';
+    if (left < 0 && right < 0) return 'Backward';
+    if (left < right) return 'Rotate left';
+    if (right < left) return 'Rotate right';
+    return 'Mixed';
+  }
+
+  function getLiveVideoResolution() {
+    if (!ui.videoFeed) return '--';
+    return ui.videoFeed.naturalWidth && ui.videoFeed.naturalHeight
+      ? `${ui.videoFeed.naturalWidth} × ${ui.videoFeed.naturalHeight}`
+      : '--';
+  }
+
+  function updateResolutionLabels() {
+    const res = getLiveVideoResolution();
+    setText(ui.videoResolutionLive, res);
+    setText(ui.videoResolutionLiveDuplicate, res);
+  }
+
+  function setBadge(el, text, enabled, extraClass = '') {
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle('badge-on', !!enabled);
+    el.classList.toggle('badge-off', !enabled);
+    if (extraClass) {
+      el.classList.toggle(extraClass, true);
+    }
+  }
+
+  function boolText(v) {
+    return v ? 'ON' : 'OFF';
+  }
+
+  function maybeText(v, fallback = '--') {
+    if (v === null || v === undefined) return fallback;
+    const s = String(v).trim();
+    return s ? s : fallback;
+  }
+
+  function mmText(v) {
+    return Number.isFinite(v) && v > 0 ? `${Math.round(v)} mm` : '--';
+  }
+
+  function percentText(v) {
+    return Number.isFinite(v) ? `${Math.round(v)} %` : '--';
+  }
+
+  function logLine(msg, cls = 'logLine') {
+    if (!ui.logBox) {
+      console.log(msg);
+      return;
+    }
     const line = document.createElement('div');
-    line.className = 'logLine';
+    line.className = cls;
     const ts = new Date().toLocaleTimeString();
     line.textContent = `[${ts}] ${msg}`;
     ui.logBox.prepend(line);
-    while (ui.logBox.childElementCount > 60) {
-        ui.logBox.removeChild(ui.logBox.lastChild);
+    while (ui.logBox.childElementCount > 80) {
+      ui.logBox.removeChild(ui.logBox.lastChild);
     }
-}
+  }
 
-function connectWs() {
+  function fetchJson(url) {
+    return fetch(url, { cache: 'no-store' }).then((res) => {
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return res.json();
+    });
+  }
+
+  async function loadSystemProfile() {
+    try {
+      systemProfile = await fetchJson('/api/system_profile');
+      renderSystemProfile(systemProfile);
+    } catch (err) {
+      logLine(`Impossible de charger /api/system_profile : ${err.message}`, 'logLineErr');
+    }
+  }
+
+  async function loadInitialTelemetry() {
+    try {
+      const data = await fetchJson('/api/telemetry');
+      applyTelemetry(data);
+    } catch (err) {
+      logLine(`Impossible de charger /api/telemetry : ${err.message}`, 'logLineErr');
+    }
+  }
+
+  function renderSystemProfile(profile) {
+    if (!profile) return;
+
+    setText(ui.profileBaseMode, maybeText(profile.base_mode));
+    setText(ui.profileStreamCamera, boolText(!!profile.stream_camera));
+    setText(ui.profileVisionEnabled, boolText(!!profile.vision_enabled));
+    setText(ui.profileOverlayDefault, boolText(!!profile.overlay_default));
+    setText(ui.profileNetworkControl, boolText(!!profile.allow_network_control));
+    setText(ui.profileTelemetryPeriod, `${profile.telemetry_period_ms ?? '--'} ms`);
+    setText(ui.profileJpegQuality, `${profile.jpeg_quality ?? '--'}`);
+
+    const cam = profile.camera || {};
+    setText(ui.profileCameraBackend, maybeText(cam.backend));
+    setText(ui.profileCameraDevice, `${cam.device ?? '--'}`);
+    setText(ui.profileCameraReference, maybeText(cam.reference));
+    setText(ui.profileCameraResolution, (cam.width && cam.height) ? `${cam.width} × ${cam.height}` : '--');
+    setText(ui.profileCameraFps, cam.fps !== undefined ? `${cam.fps} fps` : '--');
+    setText(ui.profileAiFps, cam.ai_fps !== undefined ? `${cam.ai_fps} fps` : '--');
+    setText(ui.profileCameraShowImage, boolText(!!cam.show_image));
+    setText(ui.profileCameraRecording, boolText(!!cam.recording_enabled));
+    setText(ui.profileRecordingPath, maybeText(cam.recording_path));
+    setText(ui.profileCodec, maybeText(profile.image_codec));
+
+    const vision = profile.vision || {};
+    setText(ui.profileOnnxModel, maybeText(vision.onnx_model));
+    setText(ui.profileScoreThreshold, vision.score_threshold !== undefined ? `${vision.score_threshold}` : '--');
+    setText(ui.profileNmsThreshold, vision.nms_threshold !== undefined ? `${vision.nms_threshold}` : '--');
+
+    const lidar = profile.lidar || {};
+    setText(ui.profileLidarEnabled, boolText(!!lidar.enabled));
+    setText(ui.profileLidarPort, maybeText(lidar.port));
+    setText(ui.profileLidarBaud, lidar.baudrate !== undefined ? `${lidar.baudrate}` : '--');
+    setText(ui.profileLidarMock, boolText(!!lidar.mock));
+    setText(ui.profileLidarMaxDistance, lidar.max_distance_mm !== undefined ? `${lidar.max_distance_mm} mm` : '--');
+    setText(ui.profileLidarAvoidDistance, lidar.avoid_distance_mm !== undefined ? `${lidar.avoid_distance_mm} mm` : '--');
+    setText(ui.profileLidarWebPoints, lidar.web_max_points !== undefined ? `${lidar.web_max_points}` : '--');
+  }
+
+  function connectWs() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
     ws = new WebSocket(wsUrl);
 
     ws.addEventListener('open', () => {
-        ui.wsBadge.textContent = 'WS connected';
+      setText(ui.wsBadge, 'WS connected');
+      if (ui.wsBadge) {
         ui.wsBadge.classList.remove('badge-off');
         ui.wsBadge.classList.add('badge-on');
-        logLine('WebSocket connecté.');
+      }
+      logLine('WebSocket connecté.');
     });
 
     ws.addEventListener('close', () => {
-        ui.wsBadge.textContent = 'WS disconnected';
+      setText(ui.wsBadge, 'WS disconnected');
+      if (ui.wsBadge) {
         ui.wsBadge.classList.remove('badge-on');
         ui.wsBadge.classList.add('badge-off');
-        logLine('WebSocket fermé. Reconnexion...');
-        setTimeout(connectWs, 1200);
+      }
+      if (!reconnectTimer) {
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = null;
+          connectWs();
+        }, 1200);
+      }
     });
 
     ws.addEventListener('message', (ev) => {
-        try {
-            const data = JSON.parse(ev.data);
-            if (data.type === 'telemetry' && data.payload) {
-                applyTelemetry(data.payload);
-            } else if (data.type === 'echo') {
-                logLine(`Echo: ${JSON.stringify(data.payload)}`);
-            } else if (data.type === 'info') {
-                logLine(data.message || 'info');
-            }
-        } catch (err) {
-            console.warn('Message WS illisible', err, ev.data);
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'telemetry' && data.payload) {
+          applyTelemetry(data.payload);
+        } else if (data.type === 'echo') {
+          logLine(`Echo: ${JSON.stringify(data.payload)}`);
+        } else if (data.type === 'info' || data.type === 'error') {
+          const msg = (data.payload && (data.payload.message || data.payload.msg))
+            ? (data.payload.message || data.payload.msg)
+            : (data.message || JSON.stringify(data.payload || {}));
+          logLine(`[${data.type}] ${msg}`, data.type === 'error' ? 'logLineErr' : 'logLine');
         }
+      } catch (err) {
+        console.warn('Message WS illisible', err, ev.data);
+      }
     });
-}
+  }
 
-function sendWs(obj) {
+  function sendWs(obj) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-        logLine('Commande ignorée: WebSocket non connecté.');
-        return;
+      logLine('Commande ignorée : WebSocket non connecté.', 'logLineErr');
+      return;
     }
     ws.send(JSON.stringify(obj));
-}
+    logLine(JSON.stringify(obj), 'logLineTx');
+  }
 
-function sendIfManual(payload) {
+  function sendIfManual(payload) {
     if (manualLocked) {
-        logLine('Commande manuelle ignorée en mode AUTO.');
-        return;
+      logLine('Commande manuelle ignorée en mode AUTO.', 'logLineErr');
+      return;
     }
     sendWs(payload);
-}
+  }
 
-function mmText(v) {
-    if (!Number.isFinite(v) || v <= 0) return '--';
-    return `${Math.round(v)} mm`;
-}
+  function refreshDisplayedValues() {
+    const left = has(ui.leftThruster) ? Number(ui.leftThruster.value) : 0;
+    const right = has(ui.rightThruster) ? Number(ui.rightThruster.value) : 0;
+    const conveyor = has(ui.conveyor) ? Number(ui.conveyor.value) : 0;
+    const avg = (left + right) / 2;
+    const diff = right - left;
 
-function applyTelemetry(t) {
+    setText(ui.leftThrusterValue, has(ui.leftThruster) ? signedPercentText(left) : '--');
+    setText(ui.rightThrusterValue, has(ui.rightThruster) ? signedPercentText(right) : '--');
+    setText(ui.conveyorValue, has(ui.conveyor) ? signedPercentText(conveyor) : '--');
+
+    setPowerBar(ui.leftPowerBar, left);
+    setPowerBar(ui.rightPowerBar, right);
+    setPowerBar(ui.conveyorPowerBar, conveyor);
+
+    setText(ui.speedHudVal, signedPercentText(avg));
+    setText(ui.turnHudVal, signedPercentText(diff / 2));
+    setText(ui.avgThrustVal, signedPercentText(avg));
+    setText(ui.diffThrustVal, signedPercentText(diff));
+    setText(ui.driveStateVal, computeDriveState(left, right));
+  }
+
+  function updateManualLockUi() {
+    if (ui.manualLockBanner) {
+      ui.manualLockBanner.classList.toggle('hidden', !manualLocked);
+    }
+    qs('[data-manual], #leftThruster, #rightThruster, #conveyor, [data-cam-step], #btnCamCenter, #btnForward, #btnBackward, #btnRotateLeft, #btnRotateRight, #btnStopAll')
+      .forEach((elem) => { elem.disabled = manualLocked; });
+  }
+
+  function renderDetections(detections) {
+    if (!ui.detectionsBox) return;
+
+    const safeDetections = Array.isArray(detections) ? detections : [];
+    ui.detectionsBox.innerHTML = '';
+
+    setText(ui.detectionCountVal, `${safeDetections.length}`);
+
+    if (!safeDetections.length) {
+      const empty = document.createElement('div');
+      empty.className = 'detItem empty';
+      empty.textContent = 'Aucune détection.';
+      ui.detectionsBox.appendChild(empty);
+      setText(ui.primaryDetectionVal, 'none');
+      setText(ui.confidenceVal, '--');
+      return;
+    }
+
+    const best = safeDetections.find((d) => d.primary) || safeDetections[0];
+    setText(ui.primaryDetectionVal, maybeText(best.label, 'none'));
+    setText(ui.confidenceVal, Number.isFinite(best.confidence) ? `${(best.confidence * 100).toFixed(0)} %` : '--');
+
+    safeDetections.forEach((det, idx) => {
+      const div = document.createElement('div');
+      div.className = `detItem ${det.primary ? 'primary' : ''}`;
+      div.innerHTML = `
+        <strong><span>${idx + 1}. ${maybeText(det.label, 'unknown')}</span><span>${((det.confidence || 0) * 100).toFixed(0)}%</span></strong>
+        <small>x=${det.x ?? '--'}, y=${det.y ?? '--'}, w=${det.w ?? '--'}, h=${det.h ?? '--'}</small>
+      `;
+      ui.detectionsBox.appendChild(div);
+    });
+  }
+
+  function sendThrusters() {
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    sendIfManual({
+      type: 'command',
+      action: 'thrusters',
+      left_pct: Number(ui.leftThruster.value),
+      right_pct: Number(ui.rightThruster.value)
+    });
+  }
+
+  function sendConveyor() {
+    if (!ui.conveyor) return;
+    sendIfManual({
+      type: 'command',
+      action: 'conveyor',
+      pct: Number(ui.conveyor.value)
+    });
+  }
+
+  function sendCameraSetting(name, value) {
+    sendWs({
+      type: 'command',
+      action: 'camera_setting',
+      setting: name,
+      value: Number(value)
+    });
+  }
+
+  function applyTelemetry(t) {
+    if (!t || typeof t !== 'object') return;
+    lastTelemetry = t;
+
     currentMode = t.mode || 'manual';
     manualLocked = !!t.drive_controls_locked;
 
-    ui.modeBadge.textContent = `MODE ${currentMode.toUpperCase()}`;
-    ui.modeBadge.classList.toggle('badge-manual', currentMode === 'manual');
-    ui.modeBadge.classList.toggle('badge-auto', currentMode === 'auto');
+    if (ui.modeBadge) {
+      ui.modeBadge.textContent = `MODE ${currentMode.toUpperCase()}`;
+      ui.modeBadge.classList.toggle('badge-manual', currentMode === 'manual');
+      ui.modeBadge.classList.toggle('badge-auto', currentMode === 'auto');
+    }
 
-    ui.missionBadge.textContent = t.mission_enabled ? 'MISSION ON' : 'MISSION OFF';
-    ui.missionBadge.classList.toggle('badge-on', !!t.mission_enabled);
-    ui.missionBadge.classList.toggle('badge-off', !t.mission_enabled);
+    if (ui.missionBadge) {
+      ui.missionBadge.textContent = t.mission_enabled ? 'MISSION ON' : 'MISSION OFF';
+      ui.missionBadge.classList.toggle('badge-on', !!t.mission_enabled);
+      ui.missionBadge.classList.toggle('badge-off', !t.mission_enabled);
+    }
 
-    ui.overlayBadge.textContent = t.overlay_enabled ? 'Overlay ON' : 'Overlay OFF';
-    ui.overlayBadge.classList.toggle('badge-on', !!t.overlay_enabled);
-    ui.overlayBadge.classList.toggle('badge-off', !t.overlay_enabled);
+    if (ui.overlayBadge) {
+      ui.overlayBadge.textContent = t.overlay_enabled ? 'Overlay ON' : 'Overlay OFF';
+      ui.overlayBadge.classList.toggle('badge-on', !!t.overlay_enabled);
+      ui.overlayBadge.classList.toggle('badge-off', !t.overlay_enabled);
+    }
 
     const lidar = t.lidar || {};
     const lidarConnected = !!lidar.connected;
-    ui.lidarBadge.textContent = lidarConnected ? (lidar.mock_mode ? 'LIDAR MOCK' : 'LIDAR ON') : 'LIDAR OFF';
-    ui.lidarBadge.classList.toggle('badge-on', lidarConnected);
-    ui.lidarBadge.classList.toggle('badge-off', !lidarConnected);
+    if (ui.lidarBadge) {
+      ui.lidarBadge.textContent = lidarConnected ? (lidar.mock_mode ? 'LIDAR MOCK' : 'LIDAR ON') : 'LIDAR OFF';
+      ui.lidarBadge.classList.toggle('badge-on', lidarConnected);
+      ui.lidarBadge.classList.toggle('badge-off', !lidarConnected);
+    }
 
-    ui.statusText.textContent = `status: ${t.status_text || '--'}`;
-    ui.autoState.textContent = `auto state: ${t.auto_state || '--'}`;
-    ui.targetVal.textContent = `Target: ${(t.vision?.target || '--')} (${((t.vision?.confidence || 0) * 100).toFixed(0)}%)`;
-    ui.fpsVal.textContent = `FPS: ${(t.vision?.fps || 0).toFixed(1)}`;
-    ui.batteryVal.textContent = `Battery: ${(t.battery_v || 0).toFixed(2)} V`;
+    setText(ui.statusText, `status: ${t.status_text || '--'}`);
+    setText(ui.autoState, `auto state: ${t.auto_state || '--'}`);
+    setText(ui.targetVal, `Target: ${t.vision?.target || '--'} (${((t.vision?.confidence || 0) * 100).toFixed(0)}%)`);
+    setText(ui.fpsVal, `FPS: ${(t.vision?.fps || 0).toFixed(1)}`);
+    setText(ui.batteryVal, `Battery: ${(t.battery_v || 0).toFixed(2)} V`);
 
-    ui.headingVal.textContent = `${(t.compass?.heading_deg || 0).toFixed(1)}°`;
-    ui.northVal.textContent = `${(t.compass?.mag_north_deg || 0).toFixed(1)}°`;
-    ui.rollVal.textContent = `${(t.imu?.roll_deg || 0).toFixed(1)}°`;
-    ui.pitchVal.textContent = `${(t.imu?.pitch_deg || 0).toFixed(1)}°`;
-    ui.yawVal.textContent = `${(t.imu?.yaw_rate_dps || 0).toFixed(1)} °/s`;
-    ui.gyroVecVal.textContent = `${(t.imu?.gyro_x_dps || 0).toFixed(1)} / ${(t.imu?.gyro_y_dps || 0).toFixed(1)} / ${(t.imu?.gyro_z_dps || 0).toFixed(1)}`;
+    const headingText = `${(t.compass?.heading_deg || 0).toFixed(1)}°`;
+    const northText = `${(t.compass?.mag_north_deg || 0).toFixed(1)}°`;
 
-    ui.lidarStatusVal.textContent = lidarConnected ? (lidar.status_text || (lidar.mock_mode ? 'mock' : 'running')) : '--';
-    ui.lidarHzVal.textContent = `${(lidar.scan_hz || 0).toFixed(1)} Hz`;
-    ui.lidarSamplesVal.textContent = `${Math.round(lidar.sample_count || 0)}`;
-    ui.lidarFrontVal.textContent = mmText(lidar.front_mm);
-    ui.lidarFrontRightVal.textContent = mmText(lidar.front_right_mm);
-    ui.lidarRightVal.textContent = mmText(lidar.right_mm);
-    ui.lidarRearVal.textContent = mmText(lidar.rear_mm);
-    ui.lidarLeftVal.textContent = mmText(lidar.left_mm);
-    ui.lidarFrontLeftVal.textContent = mmText(lidar.front_left_mm);
+    setText(ui.headingVal, headingText);
+    setText(ui.headingMiniVal, headingText);
+    setText(ui.videoHeadingVal, headingText);
+    setText(ui.northVal, northText);
+    setText(ui.northValDuplicate, northText);
+    setText(ui.rollVal, `${(t.imu?.roll_deg || 0).toFixed(1)}°`);
+    setText(ui.pitchVal, `${(t.imu?.pitch_deg || 0).toFixed(1)}°`);
+    setText(ui.yawVal, `${(t.imu?.yaw_rate_dps || 0).toFixed(1)} °/s`);
+    setText(ui.gyroVecVal, `${(t.imu?.gyro_x_dps || 0).toFixed(1)} / ${(t.imu?.gyro_y_dps || 0).toFixed(1)} / ${(t.imu?.gyro_z_dps || 0).toFixed(1)}`);
 
-    ui.leftThruster.value = Math.round(t.motors?.left_pct || 0);
-    ui.rightThruster.value = Math.round(t.motors?.right_pct || 0);
-    ui.conveyor.value = Math.round(t.motors?.conveyor_pct || 0);
-    ui.camPanVal.textContent = `Pan ${Math.round(t.motors?.cam_pan_deg || 0)}°`;
-    ui.camTiltVal.textContent = `Tilt ${Math.round(t.motors?.cam_tilt_deg || 0)}°`;
+    setText(ui.lidarStatusVal, lidarConnected ? (lidar.status_text || (lidar.mock_mode ? 'mock' : 'running')) : '--');
+    setText(ui.lidarHzVal, `${(lidar.scan_hz || 0).toFixed(1)} Hz`);
+    setText(ui.lidarSamplesVal, `${Math.round(lidar.sample_count || 0)}`);
+    setText(ui.lidarFrontVal, mmText(lidar.front_mm));
+    setText(ui.lidarFrontRightVal, mmText(lidar.front_right_mm));
+    setText(ui.lidarRightVal, mmText(lidar.right_mm));
+    setText(ui.lidarRearVal, mmText(lidar.rear_mm));
+    setText(ui.lidarLeftVal, mmText(lidar.left_mm));
+    setText(ui.lidarFrontLeftVal, mmText(lidar.front_left_mm));
 
-    ui.expRange.value = Math.round(t.camera?.exposure || 0);
-    ui.brightRange.value = Math.round(t.camera?.brightness || 50);
-    ui.contrastRange.value = Math.round(t.camera?.contrast || 50);
+    if (ui.leftThruster) ui.leftThruster.value = Math.round(t.motors?.left_pct || 0);
+    if (ui.rightThruster) ui.rightThruster.value = Math.round(t.motors?.right_pct || 0);
+    if (ui.conveyor) ui.conveyor.value = Math.round(t.motors?.conveyor_pct || 0);
+    setText(ui.camPanVal, `Pan ${Math.round(t.motors?.cam_pan_deg || 0)}°`);
+    setText(ui.camTiltVal, `Tilt ${Math.round(t.motors?.cam_tilt_deg || 0)}°`);
+
+    if (ui.expRange) ui.expRange.value = Math.round(t.camera?.exposure || 0);
+    if (ui.brightRange) ui.brightRange.value = Math.round(t.camera?.brightness || 50);
+    if (ui.contrastRange) ui.contrastRange.value = Math.round(t.camera?.contrast || 50);
 
     lastLidarPoints = Array.isArray(lidar.points) ? lidar.points : [];
     lastLidarMaxDistance = Math.max(1000, Number(lidar.max_distance_mm || 8000));
+
+    setText(ui.videoModeMini, currentMode.toUpperCase());
+    setText(ui.videoMissionMini, t.mission_enabled ? 'ACTIVE' : 'OFF');
+    setText(ui.modeInfoVal, currentMode.toUpperCase());
+    setText(ui.missionInfoVal, t.mission_enabled ? 'ACTIVE' : 'OFF');
+    setText(ui.overlayInfoVal, t.overlay_enabled ? 'ON' : 'OFF');
+    setText(ui.trackingVal, maybeText(t.vision?.target, 'none'));
+
+    updateResolutionLabels();
 
     refreshDisplayedValues();
     updateManualLockUi();
@@ -182,73 +535,66 @@ function applyTelemetry(t) {
     drawCompass(t.compass?.heading_deg || 0);
     drawGyro(t.imu?.roll_deg || 0, t.imu?.pitch_deg || 0, t.imu?.yaw_rate_dps || 0);
     drawLidar(lastLidarPoints, lastLidarMaxDistance, {
-        front: lidar.front_mm || 0,
-        right: lidar.right_mm || 0,
-        left: lidar.left_mm || 0,
-        rear: lidar.rear_mm || 0
+      front: lidar.front_mm || 0,
+      right: lidar.right_mm || 0,
+      left: lidar.left_mm || 0,
+      rear: lidar.rear_mm || 0
     });
-}
+  }
 
-function updateManualLockUi() {
-    ui.manualLockBanner.classList.toggle('hidden', !manualLocked);
-    for (const elem of document.querySelectorAll('[data-manual], #leftThruster, #rightThruster, #conveyor, [data-cam-step], #btnCamCenter, #btnForward, #btnBackward, #btnRotateLeft, #btnRotateRight, #btnStopAll')) {
-        elem.disabled = manualLocked;
+  function setThrustersLocal(left, right) {
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    ui.leftThruster.value = `${Math.round(clamp(left, -100, 100))}`;
+    ui.rightThruster.value = `${Math.round(clamp(right, -100, 100))}`;
+    refreshDisplayedValues();
+  }
+
+  function applyKeyboardDrive() {
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    if (manualLocked) return;
+
+    let left = 0;
+    let right = 0;
+
+    const forward = activeKeys.has('arrowup') || activeKeys.has('w');
+    const backward = activeKeys.has('arrowdown') || activeKeys.has('s');
+    const rotateLeft = activeKeys.has('arrowleft') || activeKeys.has('a');
+    const rotateRight = activeKeys.has('arrowright') || activeKeys.has('d');
+
+    if (forward) {
+      left += 60;
+      right += 60;
     }
-}
-
-function refreshDisplayedValues() {
-    ui.leftThrusterValue.textContent = `${ui.leftThruster.value} %`;
-    ui.rightThrusterValue.textContent = `${ui.rightThruster.value} %`;
-    ui.conveyorValue.textContent = `${ui.conveyor.value} %`;
-}
-
-function renderDetections(detections) {
-    ui.detectionsBox.innerHTML = '';
-    if (!detections.length) {
-        const empty = document.createElement('div');
-        empty.className = 'detItem empty';
-        empty.textContent = 'Aucune détection.';
-        ui.detectionsBox.appendChild(empty);
-        return;
+    if (backward) {
+      left -= 45;
+      right -= 45;
     }
-    detections.forEach((det, idx) => {
-        const div = document.createElement('div');
-        div.className = `detItem ${det.primary ? 'primary' : ''}`;
-        div.innerHTML = `
-            <strong><span>${idx + 1}. ${det.label}</span><span>${(det.confidence * 100).toFixed(0)}%</span></strong>
-            <small>x=${det.x}, y=${det.y}, w=${det.w}, h=${det.h}</small>
-        `;
-        ui.detectionsBox.appendChild(div);
-    });
-}
+    if (rotateLeft) {
+      left -= 35;
+      right += 35;
+    }
+    if (rotateRight) {
+      left += 35;
+      right -= 35;
+    }
 
-function sendThrusters() {
-    sendIfManual({
-        type: 'command',
-        action: 'thrusters',
-        left_pct: Number(ui.leftThruster.value),
-        right_pct: Number(ui.rightThruster.value)
-    });
-}
+    left = clamp(left, -100, 100);
+    right = clamp(right, -100, 100);
 
-function sendConveyor() {
-    sendIfManual({
-        type: 'command',
-        action: 'conveyor',
-        pct: Number(ui.conveyor.value)
-    });
-}
+    setThrustersLocal(left, right);
+    sendThrusters();
+  }
 
-function sendCameraSetting(name, value) {
-    sendWs({
-        type: 'command',
-        action: 'camera_setting',
-        setting: name,
-        value: Number(value)
-    });
-}
+  function stopKeyboardDrive() {
+    keyboardDriveActive = false;
+    activeKeys.clear();
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    setThrustersLocal(0, 0);
+    sendIfManual({ type: 'command', action: 'stop_all' });
+  }
 
-function drawCompass(heading) {
+  function drawCompass(heading) {
+    if (!ui.compassCanvas) return;
     const ctx = ui.compassCanvas.getContext('2d');
     const w = ui.compassCanvas.width;
     const h = ui.compassCanvas.height;
@@ -275,16 +621,16 @@ function drawCompass(heading) {
     ctx.fillText('W', cx - r - 18, cy + 6);
 
     for (let i = 0; i < 360; i += 30) {
-        const rad = (i - 90) * Math.PI / 180;
-        const x1 = cx + Math.cos(rad) * (r - 10);
-        const y1 = cy + Math.sin(rad) * (r - 10);
-        const x2 = cx + Math.cos(rad) * r;
-        const y2 = cy + Math.sin(rad) * r;
-        ctx.strokeStyle = '#64748b';
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.stroke();
+      const rad = (i - 90) * Math.PI / 180;
+      const x1 = cx + Math.cos(rad) * (r - 10);
+      const y1 = cy + Math.sin(rad) * (r - 10);
+      const x2 = cx + Math.cos(rad) * r;
+      const y2 = cy + Math.sin(rad) * r;
+      ctx.strokeStyle = '#64748b';
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
     }
 
     const rad = (heading - 90) * Math.PI / 180;
@@ -298,9 +644,10 @@ function drawCompass(heading) {
     ctx.fillStyle = '#f8fafc';
     ctx.font = '700 22px Arial';
     ctx.fillText(`${heading.toFixed(1)}°`, cx, cy + 8);
-}
+  }
 
-function drawGyro(roll, pitch, yawRate) {
+  function drawGyro(roll, pitch, yawRate) {
+    if (!ui.gyroCanvas) return;
     const ctx = ui.gyroCanvas.getContext('2d');
     const w = ui.gyroCanvas.width;
     const h = ui.gyroCanvas.height;
@@ -344,9 +691,10 @@ function drawGyro(roll, pitch, yawRate) {
     ctx.fillText(`Roll: ${roll.toFixed(1)}°`, 18, 28);
     ctx.fillText(`Pitch: ${pitch.toFixed(1)}°`, 18, 52);
     ctx.fillText(`Yaw rate: ${yawRate.toFixed(1)} °/s`, 18, 76);
-}
+  }
 
-function drawLidar(points, maxDistance, sectors) {
+  function drawLidar(points, maxDistance, sectors) {
+    if (!ui.lidarCanvas) return;
     const ctx = ui.lidarCanvas.getContext('2d');
     const w = ui.lidarCanvas.width;
     const h = ui.lidarCanvas.height;
@@ -361,9 +709,9 @@ function drawLidar(points, maxDistance, sectors) {
     ctx.strokeStyle = '#243244';
     ctx.lineWidth = 1;
     for (let ring = 1; ring <= 4; ring += 1) {
-        ctx.beginPath();
-        ctx.arc(cx, cy, (r * ring) / 4, 0, Math.PI * 2);
-        ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx, cy, (r * ring) / 4, 0, Math.PI * 2);
+      ctx.stroke();
     }
 
     ctx.beginPath();
@@ -382,17 +730,17 @@ function drawLidar(points, maxDistance, sectors) {
     ctx.fillText('Right', w - 26, cy + 4);
 
     for (const p of points) {
-        if (!Number.isFinite(p.a) || !Number.isFinite(p.d) || p.d <= 0) continue;
-        const ratio = Math.min(1, p.d / maxDistance);
-        const rr = ratio * r;
-        const rad = (p.a - 90) * Math.PI / 180;
-        const x = cx + Math.cos(rad) * rr;
-        const y = cy + Math.sin(rad) * rr;
+      if (!Number.isFinite(p.a) || !Number.isFinite(p.d) || p.d <= 0) continue;
+      const ratio = Math.min(1, p.d / maxDistance);
+      const rr = ratio * r;
+      const rad = (p.a - 90) * Math.PI / 180;
+      const x = cx + Math.cos(rad) * rr;
+      const y = cy + Math.sin(rad) * rr;
 
-        const near = p.d < 600;
-        const mid = p.d >= 600 && p.d < 1400;
-        ctx.fillStyle = near ? '#ef4444' : (mid ? '#f59e0b' : '#38bdf8');
-        ctx.fillRect(x, y, 2, 2);
+      const near = p.d < 600;
+      const mid = p.d >= 600 && p.d < 1400;
+      ctx.fillStyle = near ? '#ef4444' : (mid ? '#f59e0b' : '#38bdf8');
+      ctx.fillRect(x, y, 2, 2);
     }
 
     ctx.strokeStyle = '#22c55e';
@@ -409,89 +757,147 @@ function drawLidar(points, maxDistance, sectors) {
     ctx.fillText(`R ${mmText(sectors.right)}`, 12, 42);
     ctx.fillText(`L ${mmText(sectors.left)}`, 12, 62);
     ctx.fillText(`B ${mmText(sectors.rear)}`, 12, 82);
-}
+  }
 
-ui.leftThruster.addEventListener('input', () => { refreshDisplayedValues(); sendThrusters(); });
-ui.rightThruster.addEventListener('input', () => { refreshDisplayedValues(); sendThrusters(); });
-ui.conveyor.addEventListener('input', () => { refreshDisplayedValues(); sendConveyor(); });
+  function bind(id, eventName, handler) {
+    const el = $(id);
+    if (el) el.addEventListener(eventName, handler);
+  }
 
-for (const elem of [ui.expRange, ui.brightRange, ui.contrastRange]) {
+  if (ui.leftThruster) ui.leftThruster.addEventListener('input', () => { refreshDisplayedValues(); sendThrusters(); });
+  if (ui.rightThruster) ui.rightThruster.addEventListener('input', () => { refreshDisplayedValues(); sendThrusters(); });
+  if (ui.conveyor) ui.conveyor.addEventListener('input', () => { refreshDisplayedValues(); sendConveyor(); });
+
+  [ui.expRange, ui.brightRange, ui.contrastRange].forEach((elem) => {
+    if (!elem) return;
     elem.addEventListener('input', () => sendCameraSetting(elem.id, elem.value));
-}
+  });
 
-for (const btn of document.querySelectorAll('[data-cam-step]')) {
+  qs('[data-cam-step]').forEach((btn) => {
     btn.addEventListener('click', () => {
-        sendIfManual({
-            type: 'command',
-            action: 'camera_step',
-            axis: btn.dataset.axis,
-            steps: Number(btn.dataset.steps)
-        });
+      sendIfManual({
+        type: 'command',
+        action: 'camera_step',
+        axis: btn.dataset.axis,
+        steps: Number(btn.dataset.steps)
+      });
     });
-}
+  });
 
-document.getElementById('btnCamCenter').addEventListener('click', () => {
-    sendIfManual({ type: 'command', action: 'camera_center' });
-});
-
-document.getElementById('btnMissionStart').addEventListener('click', () => {
-    sendWs({ type: 'command', action: 'mission', cmd: 'start' });
-});
-document.getElementById('btnMissionStop').addEventListener('click', () => {
-    sendWs({ type: 'command', action: 'mission', cmd: 'stop' });
-});
-document.getElementById('btnStopAll').addEventListener('click', () => {
-    ui.leftThruster.value = 0;
-    ui.rightThruster.value = 0;
-    ui.conveyor.value = 0;
+  bind('btnCamCenter', 'click', () => sendIfManual({ type: 'command', action: 'camera_center' }));
+  bind('btnMissionStart', 'click', () => sendWs({ type: 'command', action: 'mission', cmd: 'start' }));
+  bind('btnMissionStop', 'click', () => sendWs({ type: 'command', action: 'mission', cmd: 'stop' }));
+  bind('btnStopAll', 'click', () => {
+    if (ui.leftThruster) ui.leftThruster.value = 0;
+    if (ui.rightThruster) ui.rightThruster.value = 0;
+    if (ui.conveyor) ui.conveyor.value = 0;
     refreshDisplayedValues();
+    keyboardDriveActive = false;
+    activeKeys.clear();
     sendIfManual({ type: 'command', action: 'stop_all' });
-});
+  });
 
-document.getElementById('btnManualMode').addEventListener('click', () => {
-    sendWs({ type: 'command', action: 'mode_set', mode: 'manual' });
-});
-document.getElementById('btnAutoMode').addEventListener('click', () => {
-    sendWs({ type: 'command', action: 'mode_set', mode: 'auto' });
-});
-document.getElementById('btnOverlayOn').addEventListener('click', () => {
-    sendWs({ type: 'command', action: 'overlay_toggle', enabled: true });
-});
-document.getElementById('btnOverlayOff').addEventListener('click', () => {
-    sendWs({ type: 'command', action: 'overlay_toggle', enabled: false });
-});
+  bind('btnManualMode', 'click', () => sendWs({ type: 'command', action: 'mode_set', mode: 'manual' }));
+  bind('btnAutoMode', 'click', () => sendWs({ type: 'command', action: 'mode_set', mode: 'auto' }));
+  bind('btnOverlayOn', 'click', () => sendWs({ type: 'command', action: 'overlay_toggle', enabled: true }));
+  bind('btnOverlayOff', 'click', () => sendWs({ type: 'command', action: 'overlay_toggle', enabled: false }));
 
-document.getElementById('btnForward').addEventListener('click', () => {
-    ui.leftThruster.value = 60;
-    ui.rightThruster.value = 60;
-    refreshDisplayedValues();
+  bind('btnForward', 'click', () => {
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    setThrustersLocal(60, 60);
     sendThrusters();
-});
-document.getElementById('btnBackward').addEventListener('click', () => {
-    ui.leftThruster.value = -45;
-    ui.rightThruster.value = -45;
-    refreshDisplayedValues();
-    sendThrusters();
-});
-document.getElementById('btnRotateLeft').addEventListener('click', () => {
-    ui.leftThruster.value = -35;
-    ui.rightThruster.value = 35;
-    refreshDisplayedValues();
-    sendThrusters();
-});
-document.getElementById('btnRotateRight').addEventListener('click', () => {
-    ui.leftThruster.value = 35;
-    ui.rightThruster.value = -35;
-    refreshDisplayedValues();
-    sendThrusters();
-});
+  });
 
-ui.videoFeed.addEventListener('error', () => {
-    logLine('Le flux MJPEG ne répond pas encore.');
-});
+  bind('btnBackward', 'click', () => {
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    setThrustersLocal(-45, -45);
+    sendThrusters();
+  });
 
-refreshDisplayedValues();
-drawCompass(0);
-drawGyro(0, 0, 0);
-drawLidar([], 8000, { front: 0, right: 0, left: 0, rear: 0 });
-connectWs();
+  bind('btnRotateLeft', 'click', () => {
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    setThrustersLocal(-35, 35);
+    sendThrusters();
+  });
+
+  bind('btnRotateRight', 'click', () => {
+    if (!ui.leftThruster || !ui.rightThruster) return;
+    setThrustersLocal(35, -35);
+    sendThrusters();
+  });
+
+  bind('btnSTOPprogramme', 'click', () => {
+    const state = window.confirm('Êtes-vous sûr de vouloir arrêter le programme ?');
+    if (state) {
+      sendWs({ type: 'command', action: 'programme', cmd: 'stop' });
+    }
+  });
+
+  bind('btnCalib', 'click', () => {
+    sendWs({ type: 'command', action: 'camera', cmd: 'calibration' });
+  });
+
+  window.addEventListener('keydown', (ev) => {
+    const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+
+    const key = String(ev.key || '').toLowerCase();
+    if (!['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd', ' '].includes(key)) return;
+
+    if (key === ' ') {
+      ev.preventDefault();
+      if (!manualLocked) {
+        stopKeyboardDrive();
+      }
+      return;
+    }
+
+    if (manualLocked) return;
+    ev.preventDefault();
+    keyboardDriveActive = true;
+    activeKeys.add(key);
+    applyKeyboardDrive();
+  });
+
+  window.addEventListener('keyup', (ev) => {
+    const key = String(ev.key || '').toLowerCase();
+    if (!['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'].includes(key)) return;
+    activeKeys.delete(key);
+    if (!activeKeys.size) {
+      keyboardDriveActive = false;
+      if (!manualLocked) {
+        setThrustersLocal(0, 0);
+        sendIfManual({ type: 'command', action: 'stop_all' });
+      }
+      return;
+    }
+    applyKeyboardDrive();
+  });
+
+  window.addEventListener('blur', () => {
+    if (keyboardDriveActive && !manualLocked) {
+      stopKeyboardDrive();
+    } else {
+      activeKeys.clear();
+      keyboardDriveActive = false;
+    }
+  });
+
+  if (ui.videoFeed) {
+    ui.videoFeed.addEventListener('error', () => {
+      logLine('Le flux MJPEG ne répond pas encore.', 'logLineErr');
+    });
+    ui.videoFeed.addEventListener('load', () => {
+      updateResolutionLabels();
+    });
+  }
+
+  refreshDisplayedValues();
+  updateManualLockUi();
+  drawCompass(0);
+  drawGyro(0, 0, 0);
+  drawLidar([], 8000, { front: 0, right: 0, left: 0, rear: 0 });
+  loadSystemProfile();
+  loadInitialTelemetry();
+  connectWs();
+})();

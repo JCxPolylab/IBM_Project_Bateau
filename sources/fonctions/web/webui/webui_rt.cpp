@@ -24,6 +24,7 @@
     #include <sys/select.h>
     #include <sys/socket.h>
     #include <unistd.h>
+    #include <signal.h>
 #endif
 
 namespace CATJ_webui_rt {
@@ -215,6 +216,12 @@ bool WebUiRtServer::start(const WebUiRtConfig& cfg)
 {
     stop();
     cfg_ = cfg;
+
+#if !defined(_WIN32)
+    // Prevent process termination when a client disconnects while we send data.
+    // (Linux default is to raise SIGPIPE on send() to a closed socket.)
+    ::signal(SIGPIPE, SIG_IGN);
+#endif
 
     if (!createListenSocket_()) {
         return false;
@@ -543,26 +550,66 @@ void WebUiRtServer::registerDefaultRoutes_()
 
 HttpResponse WebUiRtServer::routeHttpRequest_(const HttpRequest& req)
 {
+    HttpHandler handler;
+
     {
         std::lock_guard<std::mutex> lock(routesMutex_);
         if (req.method == "GET") {
             auto it = getRoutes_.find(req.path);
             if (it != getRoutes_.end()) {
-                return it->second(req);
+                handler = it->second;
             }
         }
         else if (req.method == "POST") {
             auto it = postRoutes_.find(req.path);
             if (it != postRoutes_.end()) {
-                return it->second(req);
+                handler = it->second;
             }
         }
     }
 
-    if (auto embedded = serveEmbedded_(req.path); embedded.status != 404 || !embedded.body.empty()) {
-        return embedded;
+    if (handler) {
+        try {
+            return handler(req);
+        }
+        catch (const std::exception& e) {
+            HttpResponse res;
+            res.status = 500;
+            res.contentType = "application/json; charset=utf-8";
+            res.body = std::string("{\"ok\":false,\"error\":\"handler exception: ")
+                + jsonEscape(e.what()) + "\"}";
+            return res;
+        }
+        catch (...) {
+            HttpResponse res;
+            res.status = 500;
+            res.contentType = "application/json; charset=utf-8";
+            res.body = "{\"ok\":false,\"error\":\"unknown handler exception\"}";
+            return res;
+        }
     }
-    return serveFile_(req.path);
+
+    try {
+        if (auto embedded = serveEmbedded_(req.path); embedded.status != 404 || !embedded.body.empty()) {
+            return embedded;
+        }
+        return serveFile_(req.path);
+    }
+    catch (const std::exception& e) {
+        HttpResponse res;
+        res.status = 500;
+        res.contentType = "application/json; charset=utf-8";
+        res.body = std::string("{\"ok\":false,\"error\":\"route exception: ")
+            + jsonEscape(e.what()) + "\"}";
+        return res;
+    }
+    catch (...) {
+        HttpResponse res;
+        res.status = 500;
+        res.contentType = "application/json; charset=utf-8";
+        res.body = "{\"ok\":false,\"error\":\"unknown route exception\"}";
+        return res;
+    }
 }
 
 HttpResponse WebUiRtServer::serveFile_(const std::string& path)
@@ -681,13 +728,19 @@ bool WebUiRtServer::handleWebSocketUpgrade_(SocketHandle sock, const HttpRequest
         ev.remoteIp = req.remoteIp;
         ev.remotePort = req.remotePort;
         ev.rawJson = text;
+
+        //Récupération des commandes
         tryExtractJsonStringField_(text, "type", ev.type);
         tryExtractJsonStringField_(text, "action", ev.action);
 
         static const char* keys[] = {
             "cmd", "axis", "dir", "button", "source",
             "left_pct", "right_pct", "pct", "steps", "value",
-            "setting", "mode", "target", "pan_deg", "tilt_deg"
+            "setting", "mode", "target", "pan_deg", "tilt_deg",
+
+            // Comms page (V2)
+            "transport", "device", "payload", "encoding", "append_nl",
+            "expect_reply", "reply_mode", "timeout_ms", "max_bytes", "clear_rx"
         };
         for (const char* k : keys) {
             std::string v;
@@ -703,7 +756,16 @@ bool WebUiRtServer::handleWebSocketUpgrade_(SocketHandle sock, const HttpRequest
             handler = commandHandler_;
         }
         if (handler) {
-            handler(ev);
+            try {
+                handler(ev);
+            }
+            catch (const std::exception& e) {
+                broadcastText(std::string("{\"type\":\"error\",\"message\":\"ws handler exception: ")
+                    + jsonEscape(e.what()) + "\"}");
+            }
+            catch (...) {
+                broadcastText("{\"type\":\"error\",\"message\":\"unknown ws handler exception\"}");
+            }
         }
     }
 
@@ -851,7 +913,15 @@ bool WebUiRtServer::sendRaw_(SocketHandle sock, const void* data, size_t size)
     size_t sent = 0;
     while (sent < size) {
         if (!waitWritable_(sock, 2000)) return false;
+#if defined(_WIN32)
         const int rc = ::send(static_cast<int>(sock), ptr + sent, static_cast<int>(size - sent), 0);
+#else
+        int flags = 0;
+        #ifdef MSG_NOSIGNAL
+            flags |= MSG_NOSIGNAL;
+        #endif
+        const int rc = ::send(static_cast<int>(sock), ptr + sent, static_cast<int>(size - sent), flags);
+#endif
         if (rc <= 0) return false;
         sent += static_cast<size_t>(rc);
     }
