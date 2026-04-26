@@ -84,6 +84,18 @@ std::optional<RobotBall> BallLogic::nearestBall(const std::vector<RobotBall>& ba
 BallType BallLogic::classifyBallType(const CATJ_camera::BallDetection& det)
 {
     using namespace CATJ_camera;
+
+    // Priorité à la décision métier configurée dans la caméra.
+    // Cela permet de garder le code flexible même si la couleur “bonne”
+    // n'est connue qu'au dernier moment via le .ini.
+    if (det.decision == BallDecision::Target) {
+        return BallType::PiscineRouge;
+    }
+    if (det.decision == BallDecision::Ignore) {
+        return BallType::PiscineAutre;
+    }
+
+    // Fallback par défaut si aucune règle explicite n'a été configurée.
     switch (det.color) {
     case BallColor::Red:
         return BallType::PiscineRouge;
@@ -92,7 +104,7 @@ BallType BallLogic::classifyBallType(const CATJ_camera::BallDetection& det)
         return BallType::PiscineAutre;
     case BallColor::Unknown:
     default:
-        return BallType::PingPongOrange; // à ajuster si ton modèle distingue orange explicitement
+        return BallType::PingPongOrange; // assimilé à la ping-pong orange par défaut
     }
 }
 

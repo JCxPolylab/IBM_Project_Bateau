@@ -62,6 +62,8 @@ struct VisionTelemetry {
     double fps = 0.0;
     std::string target = "none";
     double confidence = 0.0;
+    bool objectDetected = false;
+    int detectionCount = 0;
 };
 
 struct LidarPointTelemetry {

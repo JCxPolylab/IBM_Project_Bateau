@@ -10,6 +10,10 @@
 #include <thread>
 #include <iostream>
 #include <cmath>
+#include <limits>
+#include <utility>
+#include <vector>
+#include <algorithm>
 #ifdef CATJ_USE_ORT
 #include <onnxruntime_cxx_api.h>
 /*
@@ -196,7 +200,7 @@ namespace CATJ_camera {
         double focal_x_ = 0.0;
         double focal_y_ = 0.0;
         bool isCalibrated_ = false;
-        float calib_squareSize_ = 2.5; //2.5 cm
+        float calib_squareSize_ = 2.6; //2.5 cm
         cv::Size EchiquierSize_{ 9,6 };
         cv::Mat K_, dist_;
         cv::Mat map1_, map2_;              // pour undistort rapide via remap

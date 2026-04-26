@@ -284,6 +284,28 @@ textarea { resize: vertical; }
 .detItem small { color: var(--muted); }
 .detItem.empty { color: var(--muted); }
 
+.detection-on,
+.detection-off {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 9px;
+    border-radius: 999px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+.detection-on {
+    color: #bbf7d0 !important;
+    border: 1px solid rgba(34,197,94,0.55);
+    background: rgba(34,197,94,0.16);
+}
+.detection-off {
+    color: #cbd5e1 !important;
+    border: 1px solid rgba(148,163,184,0.35);
+    background: rgba(148,163,184,0.10);
+}
+
 .logBox {
     min-height: 260px;
     max-height: 540px;

@@ -1,5 +1,8 @@
 #include "camera.h"
 
+#include <algorithm>
+#include <limits>
+
 using namespace CATJ_camera;
 
 static inline int makeOdd(int k) { return (k % 2 == 0) ? k + 1 : k; }
@@ -533,74 +536,165 @@ cv::Rect Camera::mapBoxBack_(const cv::Rect& b, const LetterboxInfo& info, int o
 }
 
 void Camera::decodeDetections_(const cv::Mat& outRaw, const LetterboxInfo& info, int origW, int origH,
-    std::vector<cv::Rect>& boxes, std::vector<float>& scores) const {
-    // Deux formats courants :
-    // (A) Ultralytics r�cents : (1, 4+nc, N)  => pour 1 classe : (1,5,N) avec [x,y,w,h,score]
-    // (B) YOLOv5-like : (1, N, 5+nc) => [x,y,w,h,obj,cls...]
+    std::vector<cv::Rect>& boxes, std::vector<float>& scores) const
+{
+    // Formats supportes :
+    // 1) YOLOv8 / YOLOv11 brut : (1, 4+nc, N) -> [cx,cy,w,h, cls0, cls1, ...]
+    // 2) YOLOv5-like brut :      (1, N, 5+nc) -> [cx,cy,w,h, obj, cls0, cls1, ...]
+    // 3) Export NMS/end-to-end : (1, N, 6)    -> [x1,y1,x2,y2, score, class]
+    // 4) Variante NMS :          (1, N, 6)    -> [x1,y1,x2,y2, class, score]
 
-    cv::Mat out = outRaw;
 
-    // out peut �tre 3D (dims=3) : on va le rendre 2D [N x C]
-    if (out.dims == 3) {
-        int d1 = out.size[1];
-        int d2 = out.size[2];
+    boxes.clear();
+    scores.clear();
 
-        // Si d1 est petit (5,6,85...) et d2 est grand => (1, C, N) => transpose en (N, C)
-        if (d1 <= 100 && d2 > 100) {
-            cv::Mat m(d1, d2, CV_32F, (void*)out.ptr<float>());
-            cv::transpose(m, out); // (N, C)
-        }
-        else {
-            // (1, N, C)
-            out = cv::Mat(d1, d2, CV_32F, (void*)out.ptr<float>()).clone();
-        }
+    if (outRaw.empty()) {
+        return;
     }
-    else if (out.dims == 2) {
-        // d�j� ok
-    }
-    else {
+
+
+    cv::Mat out;
+
+    if (outRaw.dims == 3) {
+        const int d1 = outRaw.size[1];
+        const int d2 = outRaw.size[2];
+
+        if (d1 <= 512 && d2 > d1) {
+            // [1,C,N] -> [N,C]
+            cv::Mat m(d1, d2, CV_32F, const_cast<float*>(outRaw.ptr<float>()));
+            cv::transpose(m, out);
+        } else {
+            // [1,N,C] -> [N,C]
+            out = cv::Mat(d1, d2, CV_32F, const_cast<float*>(outRaw.ptr<float>())).clone();
+        }
+    } else if (outRaw.dims == 2) {
+        out = outRaw;
+    } else {
         return;
     }
 
     const int N = out.rows;
     const int C = out.cols;
 
-    for (int i = 0; i < N; ++i) {
-        const float* p = out.ptr<float>(i);
+    if (C < 5 || N <= 0) {
+        return;
+    }
 
-        float cx = p[0], cy = p[1], w = p[2], h = p[3];
-        float score = 0.f;
+    auto isNormalizedCoord = [](float v) -> bool {
+        return std::isfinite(v) && v >= -0.25f && v <= 1.25f;
+    };
 
-        if (C == 5) {
-            // Format (A) 1 classe : score direct en p[4]
-            score = p[4];
-        }
-        else if (C >= 6) {
-            // Format (B) : obj * cls0 (on suppose classe 0 = ball)
-            float obj = p[4];
-            float cls0 = p[5];
-            score = obj * cls0;
-        }
-        else {
-            continue;
-        }
+    auto scaleCoord = [&](float v) -> float {
+        if (isNormalizedCoord(v)) return v * static_cast<float>(onnx_inputSize_);
+        return v;
+    };
 
-        if (score < confTh_) continue;
-
-        int x = (int)std::round(cx - w / 2.f);
-        int y = (int)std::round(cy - h / 2.f);
-        cv::Rect boxLB(x, y, (int)std::round(w), (int)std::round(h));
-
-        // clamp sur image letterbox
+    auto pushBoxCxCyWh = [&](float cx, float cy, float w, float h, float score) {
+        cx = scaleCoord(cx);
+        cy = scaleCoord(cy);
+        w  = scaleCoord(w);
+        h  = scaleCoord(h);
+        if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(w) || !std::isfinite(h)) return;
+        if (w <= 1.0f || h <= 1.0f) return;
+        cv::Rect boxLB(
+            static_cast<int>(std::round(cx - w * 0.5f)),
+            static_cast<int>(std::round(cy - h * 0.5f)),
+            static_cast<int>(std::round(w)),
+            static_cast<int>(std::round(h))
+        );
         boxLB &= cv::Rect(0, 0, onnx_inputSize_, onnx_inputSize_);
-        if (boxLB.area() <= 0) continue;
-
+        if (boxLB.area() <= 0) return;
         cv::Rect box = mapBoxBack_(boxLB, info, origW, origH);
-        if (box.area() <= 0) continue;
-
+        if (box.area() <= 0) return;
         boxes.push_back(box);
         scores.push_back(score);
+    };
+
+    auto pushBoxXyXy = [&](float x1, float y1, float x2, float y2, float score) {
+        x1 = scaleCoord(x1);
+        y1 = scaleCoord(y1);
+        x2 = scaleCoord(x2);
+        y2 = scaleCoord(y2);
+        if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) || !std::isfinite(y2)) return;
+        if (x2 <= x1 || y2 <= y1) return;
+        cv::Rect boxLB(
+            cv::Point(static_cast<int>(std::round(x1)), static_cast<int>(std::round(y1))),
+            cv::Point(static_cast<int>(std::round(x2)), static_cast<int>(std::round(y2)))
+        );
+        boxLB &= cv::Rect(0, 0, onnx_inputSize_, onnx_inputSize_);
+        if (boxLB.area() <= 0) return;
+        cv::Rect box = mapBoxBack_(boxLB, info, origW, origH);
+        if (box.area() <= 0) return;
+        boxes.push_back(box);
+        scores.push_back(score);
+    };
+
+
+    for (int i = 0; i < N; ++i) {
+        const float* p = out.ptr<float>(i);
+        float score = 0.0f;
+        bool coordsAreXyxy = false;
+        int classId = -1;
+
+        if (C == 5) {
+            score = p[4];
+            coordsAreXyxy = false;
+            classId = 0;
+        } else if (C == 6) {
+            const bool looksLikeXyxy = (scaleCoord(p[2]) > scaleCoord(p[0])) && (scaleCoord(p[3]) > scaleCoord(p[1]));
+            if (looksLikeXyxy) {
+                const bool p4LooksScore = std::isfinite(p[4]) && p[4] >= 0.0f && p[4] <= 1.5f;
+                const bool p5LooksScore = std::isfinite(p[5]) && p[5] >= 0.0f && p[5] <= 1.5f;
+                if (p4LooksScore && !p5LooksScore) {
+                    score = p[4];
+                    classId = static_cast<int>(std::round(p[5]));
+                } else if (!p4LooksScore && p5LooksScore) {
+                    score = p[5];
+                    classId = static_cast<int>(std::round(p[4]));
+                } else {
+                    score = p[4];
+                    classId = static_cast<int>(std::round(p[5]));
+                }
+                coordsAreXyxy = true;
+            } else {
+                score = std::max(p[4], p[4] * p[5]);
+                classId = 0;
+                coordsAreXyxy = false;
+            }
+        } else {
+            float yolo8Max = 0.0f;
+            int yolo8Class = -1;
+            for (int c = 4; c < C; ++c) {
+                if (p[c] > yolo8Max) {
+                    yolo8Max = p[c];
+                    yolo8Class = c - 4;
+                }
+            }
+            float clsMaxAfterObj = 0.0f;
+            int yolo5Class = -1;
+            for (int c = 5; c < C; ++c) {
+                if (p[c] > clsMaxAfterObj) {
+                    clsMaxAfterObj = p[c];
+                    yolo5Class = c - 5;
+                }
+            }
+            const float yolo5Score = p[4] * clsMaxAfterObj;
+            if (yolo8Max >= yolo5Score) {
+                score = yolo8Max;
+                classId = yolo8Class;
+            } else {
+                score = yolo5Score;
+                classId = yolo5Class;
+            }
+            coordsAreXyxy = false;
+        }
+
+        if (!std::isfinite(score) || score < confTh_) continue;
+
+        if (coordsAreXyxy) pushBoxXyXy(p[0], p[1], p[2], p[3], score);
+        else pushBoxCxCyWh(p[0], p[1], p[2], p[3], score);
     }
+
 }
 
 BallColor Camera::classifyColorHSV_(const cv::Mat& frame, const cv::Rect& box) const {
@@ -813,11 +907,16 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
 {
     outDets.clear();
 
+
     // Si aucun backend n'est chargé, pas de détection possible
 #ifdef CATJ_USE_ORT
-    if (!ortLoaded_ && !netLoaded_) return false;
+    if (!ortLoaded_ && !netLoaded_) {
+        return false;
+    }
 #else
-    if (!netLoaded_) return false;
+    if (!netLoaded_) {
+        return false;
+    }
 #endif
 
     // --- throttle IA ---
@@ -825,7 +924,7 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
     const int safeAiFps = std::max(1, aiFps_);
     const auto period = std::chrono::milliseconds(1000 / safeAiFps);
 
-    if (lastInfer_ != std::chrono::steady_clock::time_point{} &&
+    if (lastInfer_ != std::chrono::steady_clock::time_point::min() &&
         (now - lastInfer_) < period)
     {
         outDets = lastDets_;
@@ -833,7 +932,10 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
     }
 
     cv::Mat frame;
-    if (!getLatestFrame(frame)) return false;
+    if (!getLatestFrame(frame)) {
+        return false;
+    }
+
 
     // --- preprocess (letterbox + blob) ---
     LetterboxInfo info{};
@@ -882,6 +984,8 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
         auto& out0 = outputs[0];
         auto ti = out0.GetTensorTypeAndShapeInfo();
         auto shape = ti.GetShape();
+
+
         float* outData = out0.GetTensorMutableData<float>();
 
         if (shape.size() == 3) {
@@ -933,6 +1037,7 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
         d.decision = decide_(d.color);
         dets.push_back(d);
     }
+
 
     // cache + timestamp
     lastInfer_ = now;

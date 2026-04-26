@@ -107,6 +107,9 @@
     missionInfoVal: $('missionInfoVal'),
     overlayInfoVal: $('overlayInfoVal'),
     trackingVal: $('trackingVal'),
+    statusDetection: $('statusDetection'),
+    statusDetectionMini: $('statusDetectionMini'),
+    cameraDetectionIndicator: $('cameraDetectionIndicator'),
   };
 
   const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
@@ -417,6 +420,25 @@
     });
   }
 
+  function updateDetectionIndicator(vision, detections) {
+    const safeDetections = Array.isArray(detections) ? detections : [];
+    const hasDetection = !!(vision && vision.object_detected) || safeDetections.length > 0;
+    const count = Number.isFinite(Number(vision?.detection_count))
+      ? Number(vision.detection_count)
+      : safeDetections.length;
+    const label = hasDetection ? `OBJET DÉTECTÉ (${count})` : 'AUCUN OBJET';
+
+    setText(ui.statusDetection, 'Détection IA');
+    setText(ui.statusDetectionMini, label);
+    setText(ui.cameraDetectionIndicator, label);
+
+    [ui.statusDetectionMini, ui.cameraDetectionIndicator].forEach((el) => {
+      if (!el) return;
+      el.classList.toggle('detection-on', hasDetection);
+      el.classList.toggle('detection-off', !hasDetection);
+    });
+  }
+
   function sendThrusters() {
     if (!ui.leftThruster || !ui.rightThruster) return;
     sendIfManual({
@@ -478,11 +500,15 @@
       ui.lidarBadge.classList.toggle('badge-off', !lidarConnected);
     }
 
+    const vision = t.vision || {};
+    const detections = Array.isArray(vision.detections) ? vision.detections : [];
+
     setText(ui.statusText, `status: ${t.status_text || '--'}`);
     setText(ui.autoState, `auto state: ${t.auto_state || '--'}`);
-    setText(ui.targetVal, `Target: ${t.vision?.target || '--'} (${((t.vision?.confidence || 0) * 100).toFixed(0)}%)`);
-    setText(ui.fpsVal, `FPS: ${(t.vision?.fps || 0).toFixed(1)}`);
+    setText(ui.targetVal, `Target: ${vision.target || '--'} (${((vision.confidence || 0) * 100).toFixed(0)}%)`);
+    setText(ui.fpsVal, `FPS: ${(vision.fps || 0).toFixed(1)}`);
     setText(ui.batteryVal, `Battery: ${(t.battery_v || 0).toFixed(2)} V`);
+    updateDetectionIndicator(vision, detections);
 
     const headingText = `${(t.compass?.heading_deg || 0).toFixed(1)}°`;
     const northText = `${(t.compass?.mag_north_deg || 0).toFixed(1)}°`;
@@ -531,7 +557,7 @@
 
     refreshDisplayedValues();
     updateManualLockUi();
-    renderDetections(t.vision?.detections || []);
+    renderDetections(detections);
     drawCompass(t.compass?.heading_deg || 0);
     drawGyro(t.imu?.roll_deg || 0, t.imu?.pitch_deg || 0, t.imu?.yaw_rate_dps || 0);
     drawLidar(lastLidarPoints, lastLidarMaxDistance, {

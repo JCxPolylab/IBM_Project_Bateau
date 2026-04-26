@@ -218,6 +218,7 @@ namespace CATJ_utility
     {
         unknown,
         course,
+        labyrinthe,
         ramassage,
         calibration,
         camera,
@@ -225,7 +226,7 @@ namespace CATJ_utility
         colorsensor,
         gyro,
         navigation,
-        remote,   // legacy: utilisé uniquement pour compat config.ini
+        remote,   
         debug,
         mesure,
     };
@@ -253,6 +254,7 @@ namespace CATJ_utility
         if (str == "measure") str = "mesure";
 
         if (str == "course") return programme_mode::course;
+        if (str == "labyrinthe" || str == "maze") return programme_mode::labyrinthe;
         if (str == "ramassage") return programme_mode::ramassage;
         if (str == "calibration") return programme_mode::calibration;
         if (str == "camera") return programme_mode::camera;
@@ -272,6 +274,7 @@ namespace CATJ_utility
         switch (mode)
         {
         case programme_mode::course: return "course";
+        case programme_mode::labyrinthe: return "labyrinthe";
         case programme_mode::ramassage: return "ramassage";
         case programme_mode::calibration: return "calibration";
         case programme_mode::camera: return "camera";

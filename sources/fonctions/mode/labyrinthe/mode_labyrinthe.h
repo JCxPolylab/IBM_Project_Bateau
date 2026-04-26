@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cmath>
+#include <string>
 
 #include "../../motherboard/motherboard_protocol.h"
 
@@ -8,20 +10,29 @@ namespace CATJ_robot {
 
     struct LidarDirections {
         float frontMm = INFINITY;
+        float frontRightMm = INFINITY;
         float rightMm = INFINITY;
         float leftMm = INFINITY;
+        float frontLeftMm = INFINITY;
         float rearMm = INFINITY;
     };
 
     class ModeLabyrinthe {
     public:
         struct Config {
-            float frontAvoidMm = 500.0f;
-            float wallFollowMm = 400.0f;
-            float rearReturnMm = 300.0f;
-            float wallToleranceMm = 80.0f;
-            float turnAngleDeg = 18.0f;
-            int speedPct = 55;
+            float frontAvoidMm = 700.0f;
+            float frontCriticalMm = 240.0f;
+            float sideContactMm = 130.0f;
+            float wallFollowMm = 420.0f;
+            float rearReturnMm = 320.0f;
+            float wallToleranceMm = 90.0f;
+            float turnAngleDeg = 22.0f;
+            float wallCorrectionDeg = 9.0f;
+            int speedPct = 45;
+            int avoidSpeedPct = 28;
+            double minRunBeforeReturnSec = 15.0;
+            int returnConfirmCycles = 3;
+            std::chrono::milliseconds contactDebounce{ 1000 };
         };
 
         ModeLabyrinthe();
@@ -34,14 +45,29 @@ namespace CATJ_robot {
         void update(const LidarDirections& d, MotherboardLink& board);
         int contacts() const { return contacts_; }
         bool circuitComplete() const { return circuitComplete_; }
+        double elapsedSec() const;
+        std::string stateName() const;
 
     private:
-        void wallFollow_(float rightMm, MotherboardLink& board);
+        enum class State {
+            Idle,
+            WallFollow,
+            Avoid,
+            Finish
+        };
+
+        void wallFollow_(const LidarDirections& d, MotherboardLink& board);
+        void registerContact_(const LidarDirections& d);
+        static bool isFinitePositive_(float v);
 
         Config cfg_{};
         bool running_ = false;
         bool circuitComplete_ = false;
         int contacts_ = 0;
+        int returnSeenCount_ = 0;
+        State state_ = State::Idle;
+        std::chrono::steady_clock::time_point startTs_{};
+        std::chrono::steady_clock::time_point lastContactTs_{};
     };
 
 } // namespace CATJ_robot

@@ -1,5 +1,6 @@
 echo off
 set "CONFIG_FILE=%PROJECT_ROOT%devConfig.txt"
+set "PI_PORT=22"
 
 REM ======= CHECKS =======
 if not exist "%CONFIG_FILE%" (
@@ -22,7 +23,8 @@ if /i "%CONFIG_MODE%"=="EPF" (
     set "PI_PORT=22"
 )
 
-ssh %PI_USER%@%PI_HOST% -p %PI_PORT%
+ssh %RASPI_USER%@%RASPI_HOST%
+pause
 
 
 

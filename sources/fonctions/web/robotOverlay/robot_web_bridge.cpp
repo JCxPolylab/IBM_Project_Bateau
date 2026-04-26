@@ -693,8 +693,11 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
     const cv::Scalar autoColor(59, 130, 246);
     const cv::Scalar warnColor(59, 59, 239);
     const cv::Scalar panelBg(12, 18, 28);
+    const cv::Scalar detectColor(34, 197, 94);
+    const cv::Scalar noDetectColor(80, 90, 110);
 
     const bool smallFrame = (out.cols <= 640 || out.rows <= 480);
+    const bool hasObject = !detectionsLocal.empty() || telem.vision.objectDetected || telem.vision.detectionCount > 0;
 
     const double labelScale = smallFrame ? 0.34 : 0.46;
     const double textScale1 = smallFrame ? 0.42 : 0.58;
@@ -733,6 +736,14 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
                    color,
                    cv::FILLED,
                    cv::LINE_AA);
+
+        if (det.primary) {
+            const int cx = box.x + box.width / 2;
+            const int cy = box.y + box.height / 2;
+            const int half = smallFrame ? 8 : 12;
+            cv::line(out, {cx - half, cy}, {cx + half, cy}, color, 1, cv::LINE_AA);
+            cv::line(out, {cx, cy - half}, {cx, cy + half}, color, 1, cv::LINE_AA);
+        }
     }
 
     drawLabelBox(out,
@@ -763,6 +774,17 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
                      1);
     }
 
+    std::ostringstream detBadge;
+    detBadge << (hasObject ? "OBJ DETECTED" : "NO OBJECT") << " | N=" << detectionsLocal.size();
+    const int detBadgeX = smallFrame ? std::max(10, out.cols - 175) : std::max(10, out.cols - 240);
+    drawLabelBox(out,
+                 detBadge.str(),
+                 {detBadgeX, 28},
+                 hasObject ? detectColor : noDetectColor,
+                 cv::Scalar(255, 255, 255),
+                 labelScale,
+                 1);
+
     std::ostringstream line1;
     line1 << std::fixed << std::setprecision(0)
           << "HDG " << telem.compass.headingDeg
@@ -777,6 +799,7 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
     line2 << "Target: " << telem.vision.target
           << " (" << std::fixed << std::setprecision(0)
           << (telem.vision.confidence * 100.0) << "%)"
+          << " | Dets " << detectionsLocal.size()
           << " | L " << telem.motors.leftPct
           << " R " << telem.motors.rightPct
           << " C " << telem.motors.conveyorPct;
@@ -874,6 +897,8 @@ std::string RobotWebBridge::buildTelemetryJson_() const
     oss << "\"fps\":" << t.vision.fps << ',';
     oss << "\"target\":\"" << esc(t.vision.target) << "\",";
     oss << "\"confidence\":" << t.vision.confidence << ',';
+    oss << "\"object_detected\":" << jsonBool_(t.vision.objectDetected) << ',';
+    oss << "\"detection_count\":" << t.vision.detectionCount << ',';
     oss << "\"detections\":[";
     for (size_t i = 0; i < dets.size(); ++i) {
         const auto& d = dets[i];

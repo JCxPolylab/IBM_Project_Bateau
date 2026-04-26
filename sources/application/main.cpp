@@ -4,6 +4,10 @@
 #include "../fonctions/Communication/comms/comms_manager.h"
 #include "../fonctions/Communication/I2C/I2C.h"
 #include "../fonctions/Communication/SPI/SPI.h"
+#include "../fonctions/motherboard/motherboard_protocol.h"
+#include "../fonctions/mode/ball/ball_logic.h"
+#include "../fonctions/mode/course/mode_course.h"
+#include "../fonctions/mode/labyrinthe/mode_labyrinthe.h"
 
 #include <algorithm>
 #include <cctype>
@@ -127,6 +131,98 @@ namespace {
         out.statusText = !snap.connected ? "disconnected" : (snap.mockMode ? "mock stream" : "live stream");
         out.points = convertLidarPoints(snap.points, webMaxPoints);
     }
+
+    CATJ_camera::BallColor parseBallColorName_(std::string s)
+    {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+
+        s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) {
+            return std::isspace(c) != 0 || c == '_' || c == '-';
+        }), s.end());
+
+        if (s == "red" || s == "rouge") return CATJ_camera::BallColor::Red;
+        if (s == "blue" || s == "bleu") return CATJ_camera::BallColor::Blue;
+        if (s == "white" || s == "blanc") return CATJ_camera::BallColor::White;
+        return CATJ_camera::BallColor::Unknown;
+    }
+
+    CATJ_camera::BallColor ballColorFromHexRgb_(uint32_t rgb)
+    {
+        const int r = static_cast<int>((rgb >> 16) & 0xFFu);
+        const int g = static_cast<int>((rgb >> 8) & 0xFFu);
+        const int b = static_cast<int>(rgb & 0xFFu);
+
+        const int maxc = std::max({ r, g, b });
+        const int minc = std::min({ r, g, b });
+
+        if (maxc >= 180 && (maxc - minc) <= 45) return CATJ_camera::BallColor::White;
+        if (r >= 100 && r > g + 30 && r > b + 30) return CATJ_camera::BallColor::Red;
+        if (b >= 100 && b > r + 20 && b > g + 20) return CATJ_camera::BallColor::Blue;
+        return CATJ_camera::BallColor::Unknown;
+    }
+
+    CATJ_camera::BallColor parseConfiguredBallColor_(const std::string& raw,
+        CATJ_camera::BallColor fallback)
+    {
+        const auto byName = parseBallColorName_(raw);
+        if (byName != CATJ_camera::BallColor::Unknown) return byName;
+
+        uint32_t rgb = 0;
+        if (CATJ_utility::parseHexU32(CATJ_utility::trim_copy(raw), rgb)) {
+            const auto byHex = ballColorFromHexRgb_(rgb);
+            if (byHex != CATJ_camera::BallColor::Unknown) return byHex;
+        }
+
+        return fallback;
+    }
+
+    const char* ballColorName_(CATJ_camera::BallColor c)
+    {
+        switch (c) {
+        case CATJ_camera::BallColor::Red: return "red";
+        case CATJ_camera::BallColor::Blue: return "blue";
+        case CATJ_camera::BallColor::White: return "white";
+        default: return "unknown";
+        }
+    }
+
+    struct MotionCommandMain_ {
+        CATJ_robot::MoveCommand move = CATJ_robot::MoveCommand::Stop;
+        int speedPct = 0;
+        float turnDeg = 0.0f;
+    };
+
+    struct MotionCommandCache_ {
+        CATJ_robot::MoveCommand move = CATJ_robot::MoveCommand::Stop;
+        int speedPct = std::numeric_limits<int>::min();
+        float turnDeg = std::numeric_limits<float>::quiet_NaN();
+    };
+
+    void applyMotionCommand_(CATJ_robot::MotherboardLink& board,
+        MotionCommandCache_& cache,
+        const MotionCommandMain_& cmd)
+    {
+        const int clampedSpeed = std::clamp(cmd.speedPct, 0, 100);
+        const float clampedTurn = std::clamp(cmd.turnDeg, -180.0f, 180.0f);
+
+        if (cache.speedPct != clampedSpeed) {
+            board.sendSpeedPct(clampedSpeed);
+            cache.speedPct = clampedSpeed;
+        }
+
+        if (!std::isfinite(cache.turnDeg) || std::fabs(cache.turnDeg - clampedTurn) >= 1.0f) {
+            board.sendTurnDeg(clampedTurn);
+            cache.turnDeg = clampedTurn;
+        }
+
+        if (cache.move != cmd.move) {
+            board.sendMove(cmd.move);
+            cache.move = cmd.move;
+        }
+    }
+
 
 
 
@@ -324,6 +420,7 @@ namespace {
         // vision enabled : active / désactive la détection + overlay.
         const bool streamCamera = iniFile.getOr("WEB", "stream camera", true);
         const bool visionEnabled = iniFile.getOr("WEB", "vision enabled", (baseMode == CATJ_utility::programme_mode::camera));
+
 
         // --- LIDAR ---
         const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
@@ -951,6 +1048,7 @@ namespace {
                 haveFrame = cam.getLatestFrame(frame);
             }
 
+
             if (haveFrame && baseMode == CATJ_utility::programme_mode::calibration && !calibObjTemplate.empty()) {
                 if (cam.calibrateCamera(true, calibObjTemplate, frame, &calibOut) && !calibOut.empty()) {
                     frame = calibOut;
@@ -962,6 +1060,7 @@ namespace {
                 std::vector<CATJ_camera::BallDetection> dets;
                 cam.detectBalls(dets);
                 webDets = convertDetections(dets);
+                bridge.updateDetections(webDets);
             }
 
             telem = bridge.telemetry();
@@ -994,6 +1093,9 @@ namespace {
                     lidarMaxDistMm
                 );
             }
+
+            telem.vision.objectDetected = !webDets.empty();
+            telem.vision.detectionCount = static_cast<int>(webDets.size());
 
             if (!webDets.empty()) {
                 const auto& best = *std::max_element(webDets.begin(), webDets.end(),
@@ -1075,6 +1177,752 @@ namespace {
         return 0;
     }
 
+
+    int runRamassageMode(const std::filesystem::path& prjPath,
+        CATJ_utility::iniReader& iniFile,
+        CATJ_camera::Camera& cam,
+        bool enableRecording,
+        const std::string& recPath,
+        const std::string& codec)
+    {
+        (void)prjPath;
+
+        struct RamassageConfig {
+            int durationSec = 300;
+            int returnReserveSec = 30;
+            int predictedScore = 100;
+            int loopSleepMs = 60;
+            int logPeriodMs = 1000;
+            int heartbeatPeriodMs = 1000;
+            int searchSpeedPct = 24;
+            int trackSpeedPct = 40;
+            int approachSpeedPct = 28;
+            int avoidSpeedPct = 26;
+            int returnSpeedPct = 20;
+            float searchTurnDeg = 14.0f;
+            float avoidTurnDeg = 28.0f;
+            float targetTurnClampDeg = 35.0f;
+            float targetTurnDeadbandDeg = 3.0f;
+            float approachDistanceM = 0.75f;
+            float rearPontoonDetectMm = 300.0f;
+            float rearSlowdownMm = 700.0f;
+            float frontAvoidMm = 650.0f;
+            int searchFlipMs = 1200;
+            float ballMinConfidence = 0.50f;
+            float ballMinDistanceM = 0.10f;
+            float ballMaxDistanceM = 6.00f;
+            float ballOrangeDiameterM = 0.040f;
+            float ballPiscineDiameterM = 0.070f;
+            float hfovDeg = 62.2f;
+        };
+
+        RamassageConfig cfg;
+        cfg.durationSec = iniFile.getOr("RAMASSAGE", "duration sec", cfg.durationSec);
+        cfg.returnReserveSec = iniFile.getOr("RAMASSAGE", "return reserve sec", cfg.returnReserveSec);
+        cfg.predictedScore = iniFile.getOr("RAMASSAGE", "predicted score", cfg.predictedScore);
+        cfg.loopSleepMs = iniFile.getOr("RAMASSAGE", "loop sleep ms", cfg.loopSleepMs);
+        cfg.logPeriodMs = iniFile.getOr("RAMASSAGE", "log period ms", cfg.logPeriodMs);
+        cfg.heartbeatPeriodMs = iniFile.getOr("RAMASSAGE", "heartbeat period ms", cfg.heartbeatPeriodMs);
+        cfg.searchSpeedPct = iniFile.getOr("RAMASSAGE", "search speed pct", cfg.searchSpeedPct);
+        cfg.trackSpeedPct = iniFile.getOr("RAMASSAGE", "track speed pct", cfg.trackSpeedPct);
+        cfg.approachSpeedPct = iniFile.getOr("RAMASSAGE", "approach speed pct", cfg.approachSpeedPct);
+        cfg.avoidSpeedPct = iniFile.getOr("RAMASSAGE", "avoid speed pct", cfg.avoidSpeedPct);
+        cfg.returnSpeedPct = iniFile.getOr("RAMASSAGE", "return speed pct", cfg.returnSpeedPct);
+        cfg.searchTurnDeg = iniFile.getOr("RAMASSAGE", "search turn deg", cfg.searchTurnDeg);
+        cfg.avoidTurnDeg = iniFile.getOr("RAMASSAGE", "avoid turn deg", cfg.avoidTurnDeg);
+        cfg.targetTurnClampDeg = iniFile.getOr("RAMASSAGE", "target turn clamp deg", cfg.targetTurnClampDeg);
+        cfg.targetTurnDeadbandDeg = iniFile.getOr("RAMASSAGE", "target turn deadband deg", cfg.targetTurnDeadbandDeg);
+        cfg.approachDistanceM = iniFile.getOr("RAMASSAGE", "approach distance m", cfg.approachDistanceM);
+        cfg.rearPontoonDetectMm = iniFile.getOr("RAMASSAGE", "rear pontoon detect mm", cfg.rearPontoonDetectMm);
+        cfg.rearSlowdownMm = iniFile.getOr("RAMASSAGE", "rear slowdown mm", cfg.rearSlowdownMm);
+        cfg.frontAvoidMm = iniFile.getOr("RAMASSAGE", "front avoid mm", cfg.frontAvoidMm);
+        cfg.searchFlipMs = iniFile.getOr("RAMASSAGE", "search flip ms", cfg.searchFlipMs);
+        cfg.ballMinConfidence = iniFile.getOr("RAMASSAGE", "ball min confidence", cfg.ballMinConfidence);
+        cfg.ballMinDistanceM = iniFile.getOr("RAMASSAGE", "ball min distance m", cfg.ballMinDistanceM);
+        cfg.ballMaxDistanceM = iniFile.getOr("RAMASSAGE", "ball max distance m", cfg.ballMaxDistanceM);
+        cfg.ballOrangeDiameterM = iniFile.getOr("RAMASSAGE", "ball orange diameter m", cfg.ballOrangeDiameterM);
+        cfg.ballPiscineDiameterM = iniFile.getOr("RAMASSAGE", "ball piscine diameter m", cfg.ballPiscineDiameterM);
+        cfg.hfovDeg = iniFile.getOr("RAMASSAGE", "camera hfov deg", cfg.hfovDeg);
+
+        const bool boardEnabled = iniFile.getOr("MOTHERBOARD", "enabled", true);
+        const std::string boardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
+        const int boardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 115200);
+        const int boardReadTimeoutMs = iniFile.getOr("MOTHERBOARD", "read timeout ms", 20);
+        const int boardWriteTimeoutMs = iniFile.getOr("MOTHERBOARD", "write timeout ms", 50);
+        const int boardStatusTimeoutMs = iniFile.getOr("MOTHERBOARD", "status timeout ms", 10);
+
+        if (!boardEnabled) {
+            std::cerr << "Mode RAMASSAGE: carte mère désactivée dans [MOTHERBOARD]." << std::endl;
+            return -60;
+        }
+
+        const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
+        const std::string lidarPort = iniFile.getOr<std::string>("LIDAR", "port", "/dev/ttyUSB0");
+        const int lidarBaud = iniFile.getOr("LIDAR", "baudrate", 460800);
+        const bool lidarMock = iniFile.getOr("LIDAR", "mock", false);
+        const float lidarMaxDistMm = iniFile.getOr("LIDAR", "max distance mm", 8000.0f);
+        const float lidarFrontHalfDeg = iniFile.getOr("LIDAR", "front half angle deg", 20.0f);
+        const float lidarLateralHalfDeg = iniFile.getOr("LIDAR", "lateral half angle deg", 50.0f);
+
+        CATJ_robot::MotherboardConfig boardCfg;
+        boardCfg.uart.port = boardPort;
+        boardCfg.uart.baudrate = boardBaud;
+        boardCfg.uart.readTimeoutMs = boardReadTimeoutMs;
+        boardCfg.uart.writeTimeoutMs = boardWriteTimeoutMs;
+        boardCfg.statusTimeoutMs = boardStatusTimeoutMs;
+
+        CATJ_robot::MotherboardLink board;
+        if (!board.open(boardCfg)) {
+            std::cerr << "Impossible d'ouvrir l'UART de la carte mère: " << boardPort << std::endl;
+            return -61;
+        }
+
+        CATJ_lidar::RplidarC1 lidar;
+        bool lidarOk = false;
+        if (lidarEnabled) {
+            CATJ_lidar::RplidarConfig lcfg;
+            lcfg.port = lidarPort;
+            lcfg.baudrate = static_cast<std::uint32_t>(std::max(115200, lidarBaud));
+            lcfg.useMockData = lidarMock;
+            lcfg.maxDistanceMm = lidarMaxDistMm;
+            lcfg.frontHalfAngleDeg = lidarFrontHalfDeg;
+            lcfg.lateralHalfAngleDeg = lidarLateralHalfDeg;
+            lidarOk = lidar.open(lcfg);
+            if (lidarOk) {
+                lidar.startScan();
+            }
+            else {
+                std::cerr << "LIDAR indisponible, poursuite sans évitement LIDAR." << std::endl;
+            }
+        }
+
+        if (!cam.startCapture(cam.getFps())) {
+            if (lidarEnabled && lidarOk) lidar.close();
+            board.close();
+            std::cerr << "Impossible de lancer la capture caméra." << std::endl;
+            return -62;
+        }
+
+        if (enableRecording) {
+            cam.startRecording(recPath, cam.getFps(), codec);
+        }
+
+        CATJ_robot::BallFilterConfig ballCfg;
+        ballCfg.minConfidence = cfg.ballMinConfidence;
+        ballCfg.minDistanceM = cfg.ballMinDistanceM;
+        ballCfg.maxDistanceM = cfg.ballMaxDistanceM;
+        ballCfg.orangeDiameterM = cfg.ballOrangeDiameterM;
+        ballCfg.piscineDiameterM = cfg.ballPiscineDiameterM;
+        ballCfg.hfovDeg = cfg.hfovDeg;
+
+        CATJ_robot::BallLogic ballLogic(ballCfg);
+
+        CATJ_robot::ModeCourse::Config courseCfg;
+        courseCfg.distCollecteRapideM = iniFile.getOr("RAMASSAGE", "collect fast distance m", 0.50f);
+        courseCfg.distBalleCollecteeM = iniFile.getOr("RAMASSAGE", "collect confirm distance m", 0.20f);
+        courseCfg.scoreBaseCollecte = iniFile.getOr("RAMASSAGE", "score base collecte", 20);
+        courseCfg.scoreBonusPonton = iniFile.getOr("RAMASSAGE", "score bonus ponton", 100);
+        courseCfg.scoreBonusAfficheur = iniFile.getOr("RAMASSAGE", "score bonus afficheur", 50);
+        courseCfg.conveyorNormalPct = iniFile.getOr("RAMASSAGE", "conveyor normal pct", 80);
+        courseCfg.conveyorRapidePct = iniFile.getOr("RAMASSAGE", "conveyor rapide pct", 100);
+        courseCfg.antiRebond = std::chrono::milliseconds(iniFile.getOr("RAMASSAGE", "anti rebond ms", 1500));
+
+        CATJ_robot::ModeCourse course(courseCfg);
+        course.prepare(cfg.predictedScore);
+        course.start();
+        course.setPontoonMonitoring(false);
+
+        board.sendHeartbeat();
+        board.sendMode(CATJ_robot::RobotMode::Ramassage);
+        board.sendObjective(cfg.predictedScore);
+        board.sendStopAll();
+
+        std::cout << "Mode RAMASSAGE autonome" << std::endl;
+        std::cout << "  - UART carte mère : " << boardPort << " @ " << boardBaud << std::endl;
+        std::cout << "  - LIDAR           : " << (lidarEnabled ? (lidarMock ? "mock" : lidarPort) : "désactivé") << std::endl;
+        std::cout << "  - Durée max       : " << cfg.durationSec << " s" << std::endl;
+        std::cout << "  - Retour réserve  : " << cfg.returnReserveSec << " s" << std::endl;
+
+        enum class CollectState {
+            Search,
+            Track,
+            Avoid,
+            ReturnHome,
+            Finished
+        };
+
+        MotionCommandCache_ motionCache;
+        CollectState state = CollectState::Search;
+        int searchSign = 1;
+
+        const auto tStart = std::chrono::steady_clock::now();
+        auto tNextFlip = tStart + std::chrono::milliseconds(cfg.searchFlipMs);
+        auto tNextLog = tStart;
+        auto tNextHeartbeat = tStart;
+
+        bool shouldQuit = false;
+
+        while (!shouldQuit) {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsedSec = std::chrono::duration_cast<std::chrono::milliseconds>(now - tStart).count() / 1000.0;
+            const double remainingSec = std::max(0.0, static_cast<double>(cfg.durationSec) - elapsedSec);
+
+            const bool returnPhase = remainingSec <= static_cast<double>(cfg.returnReserveSec);
+            course.setPontoonMonitoring(returnPhase);
+
+            if (now >= tNextHeartbeat) {
+                board.sendHeartbeat();
+                tNextHeartbeat = now + std::chrono::milliseconds(cfg.heartbeatPeriodMs);
+            }
+
+            cv::Mat frame;
+            const bool haveFrame = cam.getLatestFrame(frame);
+
+            std::vector<CATJ_camera::BallDetection> rawDetections;
+            std::vector<CATJ_robot::RobotBall> robotBalls;
+            if (haveFrame && cam.detectBalls(rawDetections)) {
+                robotBalls = ballLogic.convert(cam, rawDetections, frame.cols, frame.rows);
+            }
+
+            CATJ_lidar::SectorDistances sectors;
+            if (lidarEnabled && lidarOk) {
+                sectors = lidar.snapshot().sectors;
+            }
+
+            course.update(robotBalls, std::isfinite(sectors.rearMm) ? sectors.rearMm : -1.0f, board);
+
+            while (auto st = board.readStatusOnce(1)) {
+                if (!st->rawLine.empty()) {
+                    std::cout << "[MB] " << st->rawLine << std::endl;
+                }
+            }
+
+            const auto bestTarget = ballLogic.bestTarget(robotBalls);
+
+            MotionCommandMain_ cmd;
+            cmd.move = CATJ_robot::MoveCommand::Stop;
+            cmd.speedPct = 0;
+            cmd.turnDeg = 0.0f;
+
+            const bool obstacleFront = std::isfinite(sectors.frontMm) && sectors.frontMm > 0.0f && sectors.frontMm < cfg.frontAvoidMm;
+            const bool pontoonRear = std::isfinite(sectors.rearMm) && sectors.rearMm > 0.0f && sectors.rearMm < cfg.rearPontoonDetectMm;
+
+            if (returnPhase && (course.pontonDetected() || pontoonRear)) {
+                state = CollectState::Finished;
+                cmd.move = CATJ_robot::MoveCommand::Stop;
+                cmd.speedPct = 0;
+                cmd.turnDeg = 0.0f;
+                shouldQuit = true;
+            }
+            else if (returnPhase) {
+                state = CollectState::ReturnHome;
+                if (now >= tNextFlip) {
+                    searchSign = -searchSign;
+                    tNextFlip = now + std::chrono::milliseconds(cfg.searchFlipMs);
+                }
+
+                cmd.move = CATJ_robot::MoveCommand::Backward;
+                cmd.speedPct = (std::isfinite(sectors.rearMm) && sectors.rearMm < cfg.rearSlowdownMm)
+                    ? std::max(10, cfg.returnSpeedPct / 2)
+                    : cfg.returnSpeedPct;
+                cmd.turnDeg = searchSign * (cfg.searchTurnDeg * 0.5f);
+            }
+            else if (obstacleFront) {
+                state = CollectState::Avoid;
+                const bool goLeft = !std::isfinite(sectors.leftMm) || (std::isfinite(sectors.rightMm) && sectors.leftMm > sectors.rightMm);
+                cmd.move = CATJ_robot::MoveCommand::Forward;
+                cmd.speedPct = cfg.avoidSpeedPct;
+                cmd.turnDeg = goLeft ? -cfg.avoidTurnDeg : +cfg.avoidTurnDeg;
+            }
+            else if (bestTarget) {
+                state = CollectState::Track;
+                float targetTurn = std::clamp(bestTarget->angleDeg, -cfg.targetTurnClampDeg, cfg.targetTurnClampDeg);
+                if (std::fabs(targetTurn) < cfg.targetTurnDeadbandDeg) targetTurn = 0.0f;
+                cmd.move = CATJ_robot::MoveCommand::Forward;
+                cmd.speedPct = (bestTarget->distanceM <= cfg.approachDistanceM) ? cfg.approachSpeedPct : cfg.trackSpeedPct;
+                if (std::fabs(bestTarget->angleDeg) > 20.0f && bestTarget->distanceM < 0.80f) {
+                    cmd.speedPct = std::max(12, cfg.approachSpeedPct / 2);
+                }
+                cmd.turnDeg = targetTurn;
+            }
+            else {
+                state = CollectState::Search;
+                if (now >= tNextFlip) {
+                    searchSign = -searchSign;
+                    tNextFlip = now + std::chrono::milliseconds(cfg.searchFlipMs);
+                }
+                cmd.move = CATJ_robot::MoveCommand::Forward;
+                cmd.speedPct = cfg.searchSpeedPct;
+                cmd.turnDeg = searchSign * cfg.searchTurnDeg;
+            }
+
+            applyMotionCommand_(board, motionCache, cmd);
+
+            if (now >= tNextLog) {
+                const int positivesVisible = static_cast<int>(std::count_if(robotBalls.begin(), robotBalls.end(), [](const auto& b) {
+                    return b.isCollectible();
+                }));
+
+                std::cout << "[RAMASSAGE] t=" << std::fixed << std::setprecision(1) << elapsedSec
+                    << "s | remaining=" << remainingSec
+                    << "s | score=" << course.score()
+                    << " | visibles=" << robotBalls.size()
+                    << " | positives=" << positivesVisible
+                    << " | front=" << (std::isfinite(sectors.frontMm) ? sectors.frontMm : 0.0f)
+                    << "mm | rear=" << (std::isfinite(sectors.rearMm) ? sectors.rearMm : 0.0f)
+                    << "mm | state=";
+
+                switch (state) {
+                case CollectState::Search: std::cout << "search"; break;
+                case CollectState::Track: std::cout << "track"; break;
+                case CollectState::Avoid: std::cout << "avoid"; break;
+                case CollectState::ReturnHome: std::cout << "return"; break;
+                case CollectState::Finished: std::cout << "finished"; break;
+                }
+
+                if (bestTarget) {
+                    std::cout << " | target=" << CATJ_robot::BallLogic::toString(bestTarget->type)
+                        << " @ " << bestTarget->distanceM << "m / " << bestTarget->angleDeg << "deg";
+                }
+                std::cout << std::endl;
+
+                tNextLog = now + std::chrono::milliseconds(cfg.logPeriodMs);
+            }
+
+            const int key = cv::pollKey();
+            if (key == 'q' || key == 'Q') {
+                std::cout << "Arrêt demandé par l'utilisateur (q)." << std::endl;
+                shouldQuit = true;
+            }
+
+            if (remainingSec <= 0.0) {
+                std::cout << "Temps écoulé pour l'épreuve de ramassage." << std::endl;
+                shouldQuit = true;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, cfg.loopSleepMs)));
+        }
+
+        course.stop();
+        applyMotionCommand_(board, motionCache, MotionCommandMain_{});
+        board.sendStopAll();
+        board.sendMode(CATJ_robot::RobotMode::Stop);
+
+        std::cout << "Fin RAMASSAGE | score estimé=" << course.score()
+            << " | retour ponton=" << (course.pontonDetected() ? "OUI" : "NON")
+            << std::endl;
+
+        cam.stopCapture();
+        if (lidarEnabled && lidarOk) lidar.close();
+        board.close();
+        return 0;
+    }
+
+
+    int runLabyrintheMode(const std::filesystem::path& prjPath,
+        CATJ_utility::iniReader& iniFile)
+    {
+        (void)prjPath;
+
+        struct LabyrintheRuntimeConfig {
+            int maxDurationSec = 180;
+            int loopSleepMs = 60;
+            int logPeriodMs = 1000;
+            int heartbeatPeriodMs = 1000;
+            int contactPenaltySec = 2;
+        };
+
+        LabyrintheRuntimeConfig runtimeCfg;
+        runtimeCfg.maxDurationSec = iniFile.getOr("LABYRINTHE", "max duration sec", runtimeCfg.maxDurationSec);
+        runtimeCfg.loopSleepMs = iniFile.getOr("LABYRINTHE", "loop sleep ms", runtimeCfg.loopSleepMs);
+        runtimeCfg.logPeriodMs = iniFile.getOr("LABYRINTHE", "log period ms", runtimeCfg.logPeriodMs);
+        runtimeCfg.heartbeatPeriodMs = iniFile.getOr("LABYRINTHE", "heartbeat period ms", runtimeCfg.heartbeatPeriodMs);
+        runtimeCfg.contactPenaltySec = iniFile.getOr("LABYRINTHE", "contact penalty sec", runtimeCfg.contactPenaltySec);
+
+        const bool boardEnabled = iniFile.getOr("MOTHERBOARD", "enabled", true);
+        const std::string boardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
+        const int boardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 460800);
+        const int boardReadTimeoutMs = iniFile.getOr("MOTHERBOARD", "read timeout ms", 20);
+        const int boardWriteTimeoutMs = iniFile.getOr("MOTHERBOARD", "write timeout ms", 50);
+        const int boardStatusTimeoutMs = iniFile.getOr("MOTHERBOARD", "status timeout ms", 10);
+
+        if (!boardEnabled) {
+            std::cerr << "Mode LABYRINTHE: carte mère désactivée dans [MOTHERBOARD]." << std::endl;
+            return -70;
+        }
+
+        const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
+        if (!lidarEnabled) {
+            std::cerr << "Mode LABYRINTHE: le LIDAR doit être activé." << std::endl;
+            return -71;
+        }
+
+        const std::string lidarPort = iniFile.getOr<std::string>("LIDAR", "port", "/dev/ttyUSB0");
+        const int lidarBaud = iniFile.getOr("LIDAR", "baudrate", 460800);
+        const bool lidarMock = iniFile.getOr("LIDAR", "mock", false);
+        const float lidarMaxDistMm = iniFile.getOr("LIDAR", "max distance mm", 8000.0f);
+        const float lidarFrontHalfDeg = iniFile.getOr("LIDAR", "front half angle deg", 20.0f);
+        const float lidarLateralHalfDeg = iniFile.getOr("LIDAR", "lateral half angle deg", 50.0f);
+
+        CATJ_robot::MotherboardConfig boardCfg;
+        boardCfg.uart.port = boardPort;
+        boardCfg.uart.baudrate = boardBaud;
+        boardCfg.uart.readTimeoutMs = boardReadTimeoutMs;
+        boardCfg.uart.writeTimeoutMs = boardWriteTimeoutMs;
+        boardCfg.statusTimeoutMs = boardStatusTimeoutMs;
+
+        CATJ_robot::MotherboardLink board;
+        if (!board.open(boardCfg)) {
+            std::cerr << "Impossible d'ouvrir l'UART de la carte mère: " << boardPort << std::endl;
+            return -72;
+        }
+
+        CATJ_lidar::RplidarC1 lidar;
+        CATJ_lidar::RplidarConfig lidarCfg;
+        lidarCfg.port = lidarPort;
+        lidarCfg.baudrate = static_cast<std::uint32_t>(std::max(115200, lidarBaud));
+        lidarCfg.useMockData = lidarMock;
+        lidarCfg.maxDistanceMm = lidarMaxDistMm;
+        lidarCfg.frontHalfAngleDeg = lidarFrontHalfDeg;
+        lidarCfg.lateralHalfAngleDeg = lidarLateralHalfDeg;
+
+        if (!lidar.open(lidarCfg) || !lidar.startScan()) {
+            board.close();
+            std::cerr << "Impossible d'initialiser le LIDAR pour le mode labyrinthe." << std::endl;
+            return -73;
+        }
+
+        CATJ_robot::ModeLabyrinthe::Config modeCfg;
+        modeCfg.frontAvoidMm = iniFile.getOr("LABYRINTHE", "front avoid mm", modeCfg.frontAvoidMm);
+        modeCfg.frontCriticalMm = iniFile.getOr("LABYRINTHE", "front critical mm", modeCfg.frontCriticalMm);
+        modeCfg.sideContactMm = iniFile.getOr("LABYRINTHE", "side contact mm", modeCfg.sideContactMm);
+        modeCfg.wallFollowMm = iniFile.getOr("LABYRINTHE", "wall follow mm", modeCfg.wallFollowMm);
+        modeCfg.rearReturnMm = iniFile.getOr("LABYRINTHE", "rear return mm", modeCfg.rearReturnMm);
+        modeCfg.wallToleranceMm = iniFile.getOr("LABYRINTHE", "wall tolerance mm", modeCfg.wallToleranceMm);
+        modeCfg.turnAngleDeg = iniFile.getOr("LABYRINTHE", "turn angle deg", modeCfg.turnAngleDeg);
+        modeCfg.wallCorrectionDeg = iniFile.getOr("LABYRINTHE", "wall correction deg", modeCfg.wallCorrectionDeg);
+        modeCfg.speedPct = iniFile.getOr("LABYRINTHE", "speed pct", modeCfg.speedPct);
+        modeCfg.avoidSpeedPct = iniFile.getOr("LABYRINTHE", "avoid speed pct", modeCfg.avoidSpeedPct);
+        modeCfg.minRunBeforeReturnSec = iniFile.getOr("LABYRINTHE", "min run before return sec", modeCfg.minRunBeforeReturnSec);
+        modeCfg.returnConfirmCycles = iniFile.getOr("LABYRINTHE", "return confirm cycles", modeCfg.returnConfirmCycles);
+        modeCfg.contactDebounce = std::chrono::milliseconds(iniFile.getOr("LABYRINTHE", "contact debounce ms", 1000));
+
+        CATJ_robot::ModeLabyrinthe laby(modeCfg);
+
+        board.sendHeartbeat();
+        board.sendMode(CATJ_robot::RobotMode::Labyrinthe);
+        board.sendObjective(0);
+        board.sendStopAll();
+
+        std::cout << "Mode LABYRINTHE autonome" << std::endl;
+        std::cout << "  - UART carte mère : " << boardPort << " @ " << boardBaud << std::endl;
+        std::cout << "  - LIDAR           : " << (lidarMock ? "mock" : lidarPort) << " @ " << lidarBaud << std::endl;
+        std::cout << "  - Timeout sécurité: " << runtimeCfg.maxDurationSec << " s" << std::endl;
+
+        laby.start();
+
+        const auto tStart = std::chrono::steady_clock::now();
+        auto tNextLog = tStart;
+        auto tNextHeartbeat = tStart;
+        auto tFinish = tStart;
+
+        bool shouldQuit = false;
+        bool timedOut = false;
+
+        while (!shouldQuit && laby.running()) {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsedSec = std::chrono::duration_cast<std::chrono::milliseconds>(now - tStart).count() / 1000.0;
+
+            if (now >= tNextHeartbeat) {
+                board.sendHeartbeat();
+                tNextHeartbeat = now + std::chrono::milliseconds(runtimeCfg.heartbeatPeriodMs);
+            }
+
+            const auto snap = lidar.snapshot();
+            CATJ_robot::LidarDirections d;
+            d.frontMm = snap.sectors.frontMm;
+            d.frontRightMm = snap.sectors.frontRightMm;
+            d.rightMm = snap.sectors.rightMm;
+            d.leftMm = snap.sectors.leftMm;
+            d.frontLeftMm = snap.sectors.frontLeftMm;
+            d.rearMm = snap.sectors.rearMm;
+
+            laby.update(d, board);
+
+            auto status = board.readStatusOnce(1);
+            (void)status;
+
+            if (now >= tNextLog) {
+                std::cout << "[LABYRINTHE] t=" << std::fixed << std::setprecision(1) << elapsedSec
+                    << "s | state=" << laby.stateName()
+                    << " | contacts=" << laby.contacts()
+                    << " | front=" << (std::isfinite(d.frontMm) ? d.frontMm : 0.0f)
+                    << "mm | right=" << (std::isfinite(d.rightMm) ? d.rightMm : 0.0f)
+                    << "mm | left=" << (std::isfinite(d.leftMm) ? d.leftMm : 0.0f)
+                    << "mm | rear=" << (std::isfinite(d.rearMm) ? d.rearMm : 0.0f)
+                    << "mm" << std::endl;
+                tNextLog = now + std::chrono::milliseconds(runtimeCfg.logPeriodMs);
+            }
+
+            const int key = cv::pollKey();
+            if (key == 'q' || key == 'Q') {
+                std::cout << "Arrêt demandé par l'utilisateur (q)." << std::endl;
+                shouldQuit = true;
+                break;
+            }
+
+            if (elapsedSec >= static_cast<double>(runtimeCfg.maxDurationSec)) {
+                std::cout << "Timeout sécurité atteint en mode labyrinthe." << std::endl;
+                timedOut = true;
+                shouldQuit = true;
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, runtimeCfg.loopSleepMs)));
+        }
+
+        tFinish = std::chrono::steady_clock::now();
+        const double rawTimeSec = std::chrono::duration_cast<std::chrono::milliseconds>(tFinish - tStart).count() / 1000.0;
+        const int contacts = laby.contacts();
+        const double penaltySec = static_cast<double>(contacts * std::max(0, runtimeCfg.contactPenaltySec));
+        const double finalTimeSec = rawTimeSec + penaltySec;
+        const bool complete = laby.circuitComplete();
+
+        laby.stop();
+        board.sendStopAll();
+        board.sendMode(CATJ_robot::RobotMode::Stop);
+        lidar.close();
+        board.close();
+
+        if (complete) {
+            std::cout << "Fin LABYRINTHE | chrono brut=" << std::fixed << std::setprecision(2) << rawTimeSec
+                << " s | contacts=" << contacts
+                << " | malus=" << penaltySec
+                << " s | chrono final=" << finalTimeSec << " s" << std::endl;
+            return 0;
+        }
+
+        std::cout << "Fin LABYRINTHE | circuit incomplet"
+            << (timedOut ? " (timeout)" : "")
+            << " | chrono brut=" << std::fixed << std::setprecision(2) << rawTimeSec
+            << " s | contacts=" << contacts
+            << " | malus théorique=" << penaltySec << " s" << std::endl;
+        return 2;
+    }
+
+    int runCourseMode(const std::filesystem::path& prjPath,
+        CATJ_utility::iniReader& iniFile)
+    {
+        (void)prjPath;
+
+        struct CourseRuntimeConfig {
+            int maxDurationSec = 120;
+            int loopSleepMs = 60;
+            int logPeriodMs = 1000;
+            int heartbeatPeriodMs = 1000;
+        };
+
+        CourseRuntimeConfig runtimeCfg;
+        runtimeCfg.maxDurationSec = iniFile.getOr("COURSE", "max duration sec", runtimeCfg.maxDurationSec);
+        runtimeCfg.loopSleepMs = iniFile.getOr("COURSE", "loop sleep ms", runtimeCfg.loopSleepMs);
+        runtimeCfg.logPeriodMs = iniFile.getOr("COURSE", "log period ms", runtimeCfg.logPeriodMs);
+        runtimeCfg.heartbeatPeriodMs = iniFile.getOr("COURSE", "heartbeat period ms", runtimeCfg.heartbeatPeriodMs);
+
+        const bool boardEnabled = iniFile.getOr("MOTHERBOARD", "enabled", true);
+        const std::string boardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
+        const int boardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 460800);
+        const int boardReadTimeoutMs = iniFile.getOr("MOTHERBOARD", "read timeout ms", 20);
+        const int boardWriteTimeoutMs = iniFile.getOr("MOTHERBOARD", "write timeout ms", 50);
+        const int boardStatusTimeoutMs = iniFile.getOr("MOTHERBOARD", "status timeout ms", 10);
+
+        if (!boardEnabled) {
+            std::cerr << "Mode COURSE: carte mère désactivée dans [MOTHERBOARD]." << std::endl;
+            return -80;
+        }
+
+        const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
+        if (!lidarEnabled) {
+            std::cerr << "Mode COURSE: le LIDAR doit être activé." << std::endl;
+            return -81;
+        }
+
+        const std::string lidarPort = iniFile.getOr<std::string>("LIDAR", "port", "/dev/ttyUSB0");
+        const int lidarBaud = iniFile.getOr("LIDAR", "baudrate", 460800);
+        const bool lidarMock = iniFile.getOr("LIDAR", "mock", false);
+        const float lidarMaxDistMm = iniFile.getOr("LIDAR", "max distance mm", 8000.0f);
+        const float lidarFrontHalfDeg = iniFile.getOr("LIDAR", "front half angle deg", 20.0f);
+        const float lidarLateralHalfDeg = iniFile.getOr("LIDAR", "lateral half angle deg", 50.0f);
+
+        CATJ_robot::MotherboardConfig boardCfg;
+        boardCfg.uart.port = boardPort;
+        boardCfg.uart.baudrate = boardBaud;
+        boardCfg.uart.readTimeoutMs = boardReadTimeoutMs;
+        boardCfg.uart.writeTimeoutMs = boardWriteTimeoutMs;
+        boardCfg.statusTimeoutMs = boardStatusTimeoutMs;
+
+        CATJ_robot::MotherboardLink board;
+        if (!board.open(boardCfg)) {
+            std::cerr << "Impossible d'ouvrir l'UART de la carte mère: " << boardPort << std::endl;
+            return -82;
+        }
+
+        CATJ_lidar::RplidarC1 lidar;
+        CATJ_lidar::RplidarConfig lidarCfg;
+        lidarCfg.port = lidarPort;
+        lidarCfg.baudrate = static_cast<std::uint32_t>(std::max(115200, lidarBaud));
+        lidarCfg.useMockData = lidarMock;
+        lidarCfg.maxDistanceMm = lidarMaxDistMm;
+        lidarCfg.frontHalfAngleDeg = lidarFrontHalfDeg;
+        lidarCfg.lateralHalfAngleDeg = lidarLateralHalfDeg;
+
+        if (!lidar.open(lidarCfg) || !lidar.startScan()) {
+            board.close();
+            std::cerr << "Impossible d'initialiser le LIDAR pour le mode course." << std::endl;
+            return -83;
+        }
+
+        CATJ_robot::ModeCourseDemiTour::Config modeCfg;
+        modeCfg.markerApproachMm = iniFile.getOr("COURSE", "marker approach mm", modeCfg.markerApproachMm);
+        modeCfg.markerCaptureMm = iniFile.getOr("COURSE", "marker capture mm", modeCfg.markerCaptureMm);
+        modeCfg.markerTooCloseMm = iniFile.getOr("COURSE", "marker too close mm", modeCfg.markerTooCloseMm);
+        modeCfg.homeDetectMm = iniFile.getOr("COURSE", "home detect mm", modeCfg.homeDetectMm);
+        modeCfg.straightWallBalanceMm = iniFile.getOr("COURSE", "straight wall balance mm", modeCfg.straightWallBalanceMm);
+        modeCfg.straightHeadingCorrectionDeg = iniFile.getOr("COURSE", "straight heading correction deg", modeCfg.straightHeadingCorrectionDeg);
+        modeCfg.arcTurnDeg = iniFile.getOr("COURSE", "arc turn deg", modeCfg.arcTurnDeg);
+        modeCfg.arcTightTurnDeg = iniFile.getOr("COURSE", "arc tight turn deg", modeCfg.arcTightTurnDeg);
+        modeCfg.counterTurnDeg = iniFile.getOr("COURSE", "counter turn deg", modeCfg.counterTurnDeg);
+        modeCfg.searchTurnDeg = iniFile.getOr("COURSE", "search turn deg", modeCfg.searchTurnDeg);
+        modeCfg.frontContactMm = iniFile.getOr("COURSE", "front contact mm", modeCfg.frontContactMm);
+        modeCfg.sideContactMm = iniFile.getOr("COURSE", "side contact mm", modeCfg.sideContactMm);
+        modeCfg.speedStraightPct = iniFile.getOr("COURSE", "speed straight pct", modeCfg.speedStraightPct);
+        modeCfg.speedApproachPct = iniFile.getOr("COURSE", "speed approach pct", modeCfg.speedApproachPct);
+        modeCfg.speedArcPct = iniFile.getOr("COURSE", "speed arc pct", modeCfg.speedArcPct);
+        modeCfg.speedCounterPct = iniFile.getOr("COURSE", "speed counter pct", modeCfg.speedCounterPct);
+        modeCfg.speedReturnPct = iniFile.getOr("COURSE", "speed return pct", modeCfg.speedReturnPct);
+        modeCfg.speedBackupPct = iniFile.getOr("COURSE", "speed backup pct", modeCfg.speedBackupPct);
+        modeCfg.speedSearchPct = iniFile.getOr("COURSE", "speed search pct", modeCfg.speedSearchPct);
+        modeCfg.clockwiseTurn = iniFile.getOr("COURSE", "clockwise turn", modeCfg.clockwiseTurn);
+        modeCfg.fallbackMarkerSec = iniFile.getOr("COURSE", "fallback marker sec", modeCfg.fallbackMarkerSec);
+        modeCfg.minHomeDetectSec = iniFile.getOr("COURSE", "min home detect sec", modeCfg.minHomeDetectSec);
+        modeCfg.minReturnTravelSec = iniFile.getOr("COURSE", "min return travel sec", modeCfg.minReturnTravelSec);
+        modeCfg.homeConfirmCycles = iniFile.getOr("COURSE", "home confirm cycles", modeCfg.homeConfirmCycles);
+        modeCfg.backupDuration = std::chrono::milliseconds(iniFile.getOr("COURSE", "backup duration ms", 500));
+        modeCfg.arcDuration = std::chrono::milliseconds(iniFile.getOr("COURSE", "arc duration ms", 2600));
+        modeCfg.counterDuration = std::chrono::milliseconds(iniFile.getOr("COURSE", "counter duration ms", 1100));
+        modeCfg.searchFlipPeriod = std::chrono::milliseconds(iniFile.getOr("COURSE", "search flip ms", 1200));
+        modeCfg.contactDebounce = std::chrono::milliseconds(iniFile.getOr("COURSE", "contact debounce ms", 1000));
+
+        CATJ_robot::ModeCourseDemiTour course(modeCfg);
+
+        board.sendHeartbeat();
+        board.sendMode(CATJ_robot::RobotMode::Course);
+        board.sendObjective(0);
+        board.sendStopAll();
+
+        std::cout << "Mode COURSE autonome (demi-tour autour d'une balise)" << std::endl;
+        std::cout << "  - UART carte mère : " << boardPort << " @ " << boardBaud << std::endl;
+        std::cout << "  - LIDAR           : " << (lidarMock ? "mock" : lidarPort) << " @ " << lidarBaud << std::endl;
+        std::cout << "  - Timeout sécurité: " << runtimeCfg.maxDurationSec << " s" << std::endl;
+        std::cout << "  - Sens rotation   : " << (modeCfg.clockwiseTurn ? "horaire" : "anti-horaire") << std::endl;
+
+        course.start();
+
+        const auto tStart = std::chrono::steady_clock::now();
+        auto tNextLog = tStart;
+        auto tNextHeartbeat = tStart;
+        auto tFinish = tStart;
+
+        bool shouldQuit = false;
+        bool timedOut = false;
+
+        while (!shouldQuit && course.running()) {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsedSec = std::chrono::duration_cast<std::chrono::milliseconds>(now - tStart).count() / 1000.0;
+
+            if (now >= tNextHeartbeat) {
+                board.sendHeartbeat();
+                tNextHeartbeat = now + std::chrono::milliseconds(runtimeCfg.heartbeatPeriodMs);
+            }
+
+            const auto snap = lidar.snapshot();
+            CATJ_robot::CourseLidarDirections d;
+            d.frontMm = snap.sectors.frontMm;
+            d.frontRightMm = snap.sectors.frontRightMm;
+            d.rightMm = snap.sectors.rightMm;
+            d.leftMm = snap.sectors.leftMm;
+            d.frontLeftMm = snap.sectors.frontLeftMm;
+            d.rearMm = snap.sectors.rearMm;
+
+            course.update(d, board);
+
+            while (auto status = board.readStatusOnce(1)) {
+                if (!status->rawLine.empty()) {
+                    std::cout << "[MB] " << status->rawLine << std::endl;
+                }
+            }
+
+            if (now >= tNextLog) {
+                std::cout << "[COURSE] t=" << std::fixed << std::setprecision(1) << elapsedSec
+                    << "s | state=" << course.stateName()
+                    << " | marker=" << (course.markerSeen() ? "yes" : "no")
+                    << " | home=" << (course.homeSeen() ? "yes" : "no")
+                    << " | contacts=" << course.contacts()
+                    << " | front=" << (std::isfinite(d.frontMm) ? d.frontMm : 0.0f)
+                    << "mm | right=" << (std::isfinite(d.rightMm) ? d.rightMm : 0.0f)
+                    << "mm | left=" << (std::isfinite(d.leftMm) ? d.leftMm : 0.0f)
+                    << "mm | rear=" << (std::isfinite(d.rearMm) ? d.rearMm : 0.0f)
+                    << "mm" << std::endl;
+                tNextLog = now + std::chrono::milliseconds(runtimeCfg.logPeriodMs);
+            }
+
+            const int key = cv::pollKey();
+            if (key == 'q' || key == 'Q') {
+                std::cout << "Arrêt demandé par l'utilisateur (q)." << std::endl;
+                shouldQuit = true;
+                break;
+            }
+
+            if (elapsedSec >= static_cast<double>(runtimeCfg.maxDurationSec)) {
+                std::cout << "Timeout sécurité atteint en mode course." << std::endl;
+                timedOut = true;
+                shouldQuit = true;
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, runtimeCfg.loopSleepMs)));
+        }
+
+        tFinish = std::chrono::steady_clock::now();
+        const double rawTimeSec = std::chrono::duration_cast<std::chrono::milliseconds>(tFinish - tStart).count() / 1000.0;
+        const int contacts = course.contacts();
+        const bool complete = course.courseComplete();
+
+        course.stop();
+        board.sendStopAll();
+        board.sendMode(CATJ_robot::RobotMode::Stop);
+        lidar.close();
+        board.close();
+
+        if (complete) {
+            std::cout << "Fin COURSE | demi-tour validé | chrono=" << std::fixed << std::setprecision(2) << rawTimeSec
+                << " s | contacts estimés=" << contacts
+                << " | balise=" << (course.markerSeen() ? "OUI" : "NON")
+                << " | retour=" << (course.homeSeen() ? "OUI" : "NON")
+                << std::endl;
+            return 0;
+        }
+
+        std::cout << "Fin COURSE | parcours incomplet"
+            << (timedOut ? " (timeout)" : "")
+            << " | chrono=" << std::fixed << std::setprecision(2) << rawTimeSec
+            << " s | contacts estimés=" << contacts
+            << " | balise=" << (course.markerSeen() ? "OUI" : "NON")
+            << " | retour=" << (course.homeSeen() ? "OUI" : "NON")
+            << std::endl;
+        return 2;
+    }
+
+
     int runLidarMode(CATJ_utility::iniReader& iniFile)
     {
         const std::string lidarPort = iniFile.getOr<std::string>("LIDAR", "port", "/dev/ttyUSB0");
@@ -1128,8 +1976,6 @@ int main()
     CATJ_error::error erreur;
     cv::Mat frame;
     cv::Mat calibOut;
-    UINT32 colorTargetHex = 0;
-    UINT32 colorIgnoreHex = 0;
     std::vector<cv::Point3f> objTemplate;
     std::vector<std::vector<cv::Point3f>> objPts;
     std::string str;
@@ -1172,6 +2018,20 @@ int main()
             << CATJ_utility::modeToStr(baseMode) << std::endl;
 
         mode = baseMode;
+    }
+
+    const bool modeSupportsRemoteWeb =
+        (mode == CATJ_utility::programme_mode::camera)
+        || (mode == CATJ_utility::programme_mode::ramassage)
+        || (mode == CATJ_utility::programme_mode::labyrinthe)
+        || (mode == CATJ_utility::programme_mode::course)
+        || (mode == CATJ_utility::programme_mode::calibration);
+
+    if (remoteEnabled && !modeSupportsRemoteWeb) {
+        std::cout << "WEB remote ignoré pour le mode "
+            << CATJ_utility::modeToStr(mode)
+            << " (mode local prioritaire)" << std::endl;
+        remoteEnabled = false;
     }
 
     iniFile.get("CAMERA", "reference", str);
@@ -1220,14 +2080,21 @@ int main()
     iniFile.get("CAMERA", "score threshold", fvalB);
     cam.setThresholds(fvalB, fvalA);
 
-    if (iniFile.get("CAMERA", "target color", str)) {
-        colorTargetHex = 0;
-        CATJ_utility::xstoi(str, colorTargetHex);
+    std::string targetColorRaw = iniFile.getOr<std::string>("CAMERA", "target color", "red");
+    std::string ignoreColorRaw = iniFile.getOr<std::string>("CAMERA", "ignore color", "blue");
+
+    CATJ_camera::BallColor configuredTargetColor = parseConfiguredBallColor_(targetColorRaw, CATJ_camera::BallColor::Red);
+    CATJ_camera::BallColor configuredIgnoreColor = parseConfiguredBallColor_(ignoreColorRaw, CATJ_camera::BallColor::Blue);
+
+    if (configuredIgnoreColor == configuredTargetColor) {
+        configuredIgnoreColor = (configuredTargetColor == CATJ_camera::BallColor::Red)
+            ? CATJ_camera::BallColor::Blue
+            : CATJ_camera::BallColor::Red;
     }
-    if (iniFile.get("CAMERA", "ignore color", str)) {
-        colorIgnoreHex = 0;
-        CATJ_utility::xstoi(str, colorIgnoreHex);
-    }
+
+    cam.setColorDecision(configuredTargetColor, configuredIgnoreColor);
+    std::cout << "Couleurs métier caméra : target=" << ballColorName_(configuredTargetColor)
+        << " | ignore=" << ballColorName_(configuredIgnoreColor) << std::endl;
 
     if (iniFile.get("CAMERA", "hardware focal mm", fvalA)
         || iniFile.get("CAMERA", "hardware focale", fvalA)) {
@@ -1255,12 +2122,21 @@ int main()
     const bool needsCalibration = (mode == CATJ_utility::programme_mode::camera)
         || (mode == CATJ_utility::programme_mode::mesure)
         || (mode == CATJ_utility::programme_mode::debug)
-        || (mode == CATJ_utility::programme_mode::calibration);
+        || (mode == CATJ_utility::programme_mode::calibration)
+        || (mode == CATJ_utility::programme_mode::ramassage);
 
     std::cout << "Calibration caméra : " << (needsCalibration ? "ON" : "OFF") << std::endl;
 
     const bool webVisionEnabled = iniFile.getOr("WEB", "vision enabled", (mode == CATJ_utility::programme_mode::camera));
+
+    // L'IA est requise :
+    //  - en mode caméra,
+    //  - en mode ramassage,
+    //  - ou dès que l'interface web distante demande la vision.
+    // Important : cela permet de tester le modèle depuis la page web même si le mode programme
+    // est encore "calibration" ou "debug".
     const bool needsDetection = (mode == CATJ_utility::programme_mode::camera)
+        || (mode == CATJ_utility::programme_mode::ramassage)
         || (remoteEnabled && webVisionEnabled);
 
     if (needsCalibration) {
@@ -1277,8 +2153,8 @@ int main()
         check_negzerror_ret(std::filesystem::exists(modelPath),
             "ONNX introuvable: " + modelPath.string());
 
-        //check_negzerror_ret(cam.loadBallDetectorONNX(modelPath.string(), cam.getOnnx_InputSize()),
-        //    "Impossible de charger le modèle ONNX: " + modelPath.string());
+        check_negzerror_ret(cam.loadBallDetectorONNX(modelPath.string(), cam.getOnnx_InputSize()),
+            "Impossible de charger le modèle ONNX: " + modelPath.string());
     }
 
     std::cout << "Mode sélectionné : " << CATJ_utility::modeToStr(mode)
@@ -1303,6 +2179,7 @@ int main()
         cam.setColorDecision(CATJ_camera::BallColor::Red, CATJ_camera::BallColor::Blue);
 
         while (cam.isOpen()) {
+			std::cout << "debug" << std::endl;
             if (cam.detectBalls(dets)) {
                 std::cout << "Balle détectée !\n" << std::endl;
             }
@@ -1340,13 +2217,17 @@ int main()
         }
         break;
 
+    case CATJ_utility::programme_mode::labyrinthe:
+        std::cout << "Mode LABYRINTHE\n";
+        return runLabyrintheMode(prjPath, iniFile);
+
     case CATJ_utility::programme_mode::course:
         std::cout << "Mode COURSE\n";
-        break;
+        return runCourseMode(prjPath, iniFile);
 
     case CATJ_utility::programme_mode::ramassage:
         std::cout << "Mode RAMASSAGE\n";
-        break;
+        return runRamassageMode(prjPath, iniFile, cam, flagRecording, recordingPath, imgCodec);
 
     case CATJ_utility::programme_mode::lidar:
         std::cout << "Mode LIDAR\n";
