@@ -11,6 +11,7 @@ namespace CATJ_robot {
     enum class BallType {
         Unknown,
         PingPongOrange,
+        PingPongWhite,
         PiscineRouge,
         PiscineAutre
     };
@@ -34,8 +35,14 @@ namespace CATJ_robot {
         float minDistanceM = 0.10f;
         float maxDistanceM = 6.00f;
         float orangeDiameterM = 0.040f;
+        float whiteDiameterM = 0.040f;
         float piscineDiameterM = 0.070f;
         float hfovDeg = 62.2f;
+        bool whiteIsPingPong = true;
+        int scorePingPongOrange = -5;
+        int scorePingPongWhite = -5;
+        int scorePiscineRouge = 10;
+        int scorePiscineAutre = -10;
     };
 
     class BallLogic {
@@ -61,6 +68,7 @@ namespace CATJ_robot {
         static int scoreFor(BallType t);
 
     private:
+        int scoreFor_(BallType t) const;
         float estimateAngleDeg_(int cx, int frameWidth) const;
         float estimateDistanceM_(const CATJ_camera::Camera& cam,
             BallType type,

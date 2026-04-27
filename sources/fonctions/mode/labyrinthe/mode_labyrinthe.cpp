@@ -16,6 +16,8 @@ namespace CATJ_robot {
         circuitComplete_ = false;
         contacts_ = 0;
         returnSeenCount_ = 0;
+        startHeadingValid_ = false;
+        startHeadingDeg_ = 0.0f;
         state_ = State::WallFollow;
         startTs_ = std::chrono::steady_clock::now();
         lastContactTs_ = startTs_ - cfg_.contactDebounce;
@@ -69,15 +71,40 @@ namespace CATJ_robot {
         }
     }
 
-    void ModeLabyrinthe::update(const LidarDirections& d, MotherboardLink& board)
+    float ModeLabyrinthe::normalizeAngleDeg_(float angleDeg)
+    {
+        while (angleDeg > 180.0f) angleDeg -= 360.0f;
+        while (angleDeg < -180.0f) angleDeg += 360.0f;
+        return angleDeg;
+    }
+
+    float ModeLabyrinthe::headingCorrection_(float headingDeg, float targetDeg) const
+    {
+        const float err = normalizeAngleDeg_(targetDeg - headingDeg);
+        if (std::fabs(err) <= cfg_.headingDeadbandDeg) return 0.0f;
+        return std::clamp(err * cfg_.headingKp, -cfg_.maxHeadingCorrectionDeg, cfg_.maxHeadingCorrectionDeg);
+    }
+
+    void ModeLabyrinthe::update(const LidarDirections& d, MotherboardLink& board, std::optional<float> headingDeg)
     {
         if (!running_) return;
 
+        if (headingDeg && std::isfinite(*headingDeg) && !startHeadingValid_) {
+            startHeadingValid_ = true;
+            startHeadingDeg_ = normalizeAngleDeg_(*headingDeg);
+        }
+
         registerContact_(d);
+
+        const bool headingFinishOk = !cfg_.requireHeadingForFinish
+            || !startHeadingValid_
+            || !headingDeg
+            || (std::fabs(normalizeAngleDeg_(startHeadingDeg_ - *headingDeg)) <= cfg_.finishHeadingToleranceDeg);
 
         if (elapsedSec() >= cfg_.minRunBeforeReturnSec
             && isFinitePositive_(d.rearMm)
-            && d.rearMm < cfg_.rearReturnMm) {
+            && d.rearMm < cfg_.rearReturnMm
+            && headingFinishOk) {
             ++returnSeenCount_;
         }
         else {
@@ -112,10 +139,10 @@ namespace CATJ_robot {
         }
 
         state_ = State::WallFollow;
-        wallFollow_(d, board);
+        wallFollow_(d, board, headingDeg);
     }
 
-    void ModeLabyrinthe::wallFollow_(const LidarDirections& d, MotherboardLink& board)
+    void ModeLabyrinthe::wallFollow_(const LidarDirections& d, MotherboardLink& board, std::optional<float> headingDeg)
     {
         board.sendSpeedPct(std::clamp(cfg_.speedPct, 0, 100));
 
@@ -125,6 +152,9 @@ namespace CATJ_robot {
         if (!isFinitePositive_(rightMm)) {
             if (isFinitePositive_(leftMm) && leftMm < (cfg_.wallFollowMm * 1.5f)) {
                 board.sendTurnDeg(+cfg_.wallCorrectionDeg);
+            }
+            else if (cfg_.useGyroWhenNoWall && startHeadingValid_ && headingDeg) {
+                board.sendTurnDeg(headingCorrection_(*headingDeg, startHeadingDeg_));
             }
             else {
                 board.sendTurnDeg(+0.5f * cfg_.wallCorrectionDeg);

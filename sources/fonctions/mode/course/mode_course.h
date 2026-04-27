@@ -19,9 +19,16 @@ namespace CATJ_robot {
             int scoreBonusPonton = 100;
             int scoreBonusAfficheur = 50;
             float distCollecteRapideM = 0.50f;
-            float distBalleCollecteeM = 0.20f;
+            float catchAngleGateDeg = 18.0f;
+            bool catchOnlyPositiveTargets = true;
             int conveyorNormalPct = 80;
             int conveyorRapidePct = 100;
+            int scoreGenericPositive = 10;
+            int scoreGenericTrash = -10;
+            int scorePingPongOrange = -5;
+            int scorePingPongWhite = -5;
+            int scorePiscineRed = 10;
+            int scorePiscineOther = -10;
             std::chrono::milliseconds antiRebond{ 1500 };
         };
 
@@ -37,6 +44,9 @@ namespace CATJ_robot {
             float rearDistanceMm,
             MotherboardLink& board);
 
+        void processMotherboardStatus(const MotherboardStatus& status, MotherboardLink& board);
+        bool lockCollection(MotherboardLink& board);
+
         int score() const { return score_; }
         int predictedScore() const { return predictedScore_; }
         bool pontonDetected() const { return retourPonton_; }
@@ -45,6 +55,9 @@ namespace CATJ_robot {
 
     private:
         void registerBall_(BallType type);
+        void registerMotherboardBall_(BallKind kind);
+        void setScoreFromBoard_(int score);
+        int scoreForBallKind_(BallKind kind) const;
 
         Config cfg_{};
         bool running_ = false;
@@ -90,6 +103,11 @@ namespace CATJ_robot {
             int speedBackupPct = 18;
             int speedSearchPct = 24;
             bool clockwiseTurn = true;
+            bool useGyroHeading = true;
+            float headingKp = 0.45f;
+            float maxHeadingCorrectionDeg = 18.0f;
+            float headingDeadbandDeg = 3.0f;
+            float returnHeadingToleranceDeg = 18.0f;
             double fallbackMarkerSec = 8.0;
             double minHomeDetectSec = 6.0;
             double minReturnTravelSec = 2.0;
@@ -108,7 +126,7 @@ namespace CATJ_robot {
         void stop();
         bool running() const { return running_; }
 
-        void update(const CourseLidarDirections& d, MotherboardLink& board);
+        void update(const CourseLidarDirections& d, MotherboardLink& board, std::optional<float> headingDeg = std::nullopt);
         bool courseComplete() const { return courseComplete_; }
         bool markerSeen() const { return markerSeen_; }
         bool homeSeen() const { return homeSeen_; }
@@ -130,6 +148,8 @@ namespace CATJ_robot {
         void registerContact_(const CourseLidarDirections& d);
         void setMotion_(MotherboardLink& board, MoveCommand move, int speedPct, float turnDeg);
         void transitionTo_(State next, MotherboardLink& board);
+        float headingCorrection_(float headingDeg, float targetDeg) const;
+        static float normalizeAngleDeg_(float angleDeg);
         static bool isFinitePositive_(float v);
 
         Config cfg_{};
@@ -140,6 +160,8 @@ namespace CATJ_robot {
         int contacts_ = 0;
         int homeSeenCount_ = 0;
         int searchTurnSign_ = 1;
+        bool startHeadingValid_ = false;
+        float startHeadingDeg_ = 0.0f;
         State state_ = State::Idle;
         MoveCommand lastMove_ = MoveCommand::Stop;
         int lastSpeedPct_ = -1;

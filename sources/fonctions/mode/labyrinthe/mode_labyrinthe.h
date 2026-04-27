@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <optional>
 #include <string>
 
 #include "../../motherboard/motherboard_protocol.h"
@@ -28,6 +29,12 @@ namespace CATJ_robot {
             float wallToleranceMm = 90.0f;
             float turnAngleDeg = 22.0f;
             float wallCorrectionDeg = 9.0f;
+            bool useGyroWhenNoWall = true;
+            bool requireHeadingForFinish = false;
+            float headingKp = 0.35f;
+            float maxHeadingCorrectionDeg = 12.0f;
+            float headingDeadbandDeg = 4.0f;
+            float finishHeadingToleranceDeg = 60.0f;
             int speedPct = 45;
             int avoidSpeedPct = 28;
             double minRunBeforeReturnSec = 15.0;
@@ -42,7 +49,7 @@ namespace CATJ_robot {
         void stop();
         bool running() const { return running_; }
 
-        void update(const LidarDirections& d, MotherboardLink& board);
+        void update(const LidarDirections& d, MotherboardLink& board, std::optional<float> headingDeg = std::nullopt);
         int contacts() const { return contacts_; }
         bool circuitComplete() const { return circuitComplete_; }
         double elapsedSec() const;
@@ -56,8 +63,10 @@ namespace CATJ_robot {
             Finish
         };
 
-        void wallFollow_(const LidarDirections& d, MotherboardLink& board);
+        void wallFollow_(const LidarDirections& d, MotherboardLink& board, std::optional<float> headingDeg);
         void registerContact_(const LidarDirections& d);
+        float headingCorrection_(float headingDeg, float targetDeg) const;
+        static float normalizeAngleDeg_(float angleDeg);
         static bool isFinitePositive_(float v);
 
         Config cfg_{};
@@ -65,6 +74,8 @@ namespace CATJ_robot {
         bool circuitComplete_ = false;
         int contacts_ = 0;
         int returnSeenCount_ = 0;
+        bool startHeadingValid_ = false;
+        float startHeadingDeg_ = 0.0f;
         State state_ = State::Idle;
         std::chrono::steady_clock::time_point startTs_{};
         std::chrono::steady_clock::time_point lastContactTs_{};

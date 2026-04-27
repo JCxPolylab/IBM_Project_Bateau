@@ -25,11 +25,14 @@ std::optional<RobotBall> BallLogic::fromCameraDetection(const CATJ_camera::Camer
     (void)frameHeight;
     RobotBall out;
     out.type = classifyBallType(det);
+    if (out.type == BallType::PingPongWhite && !cfg_.whiteIsPingPong) {
+        out.type = BallType::PiscineAutre;
+    }
     if (out.type == BallType::Unknown) {
         return std::nullopt;
     }
 
-    out.score = scoreFor(out.type);
+    out.score = scoreFor_(out.type);
     out.confidence = det.conf;
     if (out.confidence < cfg_.minConfidence) {
         return std::nullopt;
@@ -85,26 +88,20 @@ BallType BallLogic::classifyBallType(const CATJ_camera::BallDetection& det)
 {
     using namespace CATJ_camera;
 
-    // Priorité à la décision métier configurée dans la caméra.
-    // Cela permet de garder le code flexible même si la couleur “bonne”
-    // n'est connue qu'au dernier moment via le .ini.
-    if (det.decision == BallDecision::Target) {
-        return BallType::PiscineRouge;
-    }
-    if (det.decision == BallDecision::Ignore) {
-        return BallType::PiscineAutre;
-    }
-
-    // Fallback par défaut si aucune règle explicite n'a été configurée.
+    // La couleur brute HSV est volontairement prioritaire : la decision Target/Ignore
+    // sert au dashboard, mais le type metier doit rester coherent avec la table de score.
     switch (det.color) {
+    case BallColor::Orange:
+        return BallType::PingPongOrange;
+    case BallColor::White:
+        return BallType::PingPongWhite;
     case BallColor::Red:
         return BallType::PiscineRouge;
     case BallColor::Blue:
-    case BallColor::White:
         return BallType::PiscineAutre;
     case BallColor::Unknown:
     default:
-        return BallType::PingPongOrange; // assimilé à la ping-pong orange par défaut
+        return BallType::Unknown;
     }
 }
 
@@ -112,6 +109,7 @@ const char* BallLogic::toString(BallType t)
 {
     switch (t) {
     case BallType::PingPongOrange: return "pingpong_orange";
+    case BallType::PingPongWhite:  return "pingpong_white";
     case BallType::PiscineRouge:   return "piscine_rouge";
     case BallType::PiscineAutre:   return "piscine_autre";
     default: return "unknown";
@@ -122,8 +120,20 @@ int BallLogic::scoreFor(BallType t)
 {
     switch (t) {
     case BallType::PingPongOrange: return -5;
+    case BallType::PingPongWhite:  return -5;
     case BallType::PiscineRouge:   return +10;
     case BallType::PiscineAutre:   return -10;
+    default: return 0;
+    }
+}
+
+int BallLogic::scoreFor_(BallType t) const
+{
+    switch (t) {
+    case BallType::PingPongOrange: return cfg_.scorePingPongOrange;
+    case BallType::PingPongWhite:  return cfg_.scorePingPongWhite;
+    case BallType::PiscineRouge:   return cfg_.scorePiscineRouge;
+    case BallType::PiscineAutre:   return cfg_.scorePiscineAutre;
     default: return 0;
     }
 }
@@ -139,7 +149,9 @@ float BallLogic::estimateDistanceM_(const CATJ_camera::Camera& cam,
                                     BallType type,
                                     float apparentDiameterPx) const
 {
-    const float realDiameterM = (type == BallType::PingPongOrange) ? cfg_.orangeDiameterM : cfg_.piscineDiameterM;
+    float realDiameterM = cfg_.piscineDiameterM;
+    if (type == BallType::PingPongOrange) realDiameterM = cfg_.orangeDiameterM;
+    else if (type == BallType::PingPongWhite && cfg_.whiteIsPingPong) realDiameterM = cfg_.whiteDiameterM;
     const double distMm = cam.computeDistance_mm(realDiameterM * 1000.0f, apparentDiameterPx);
     return static_cast<float>(distMm / 1000.0);
 }

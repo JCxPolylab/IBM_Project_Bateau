@@ -58,7 +58,7 @@ Camera::Camera(int device, int w, int h,
 
     if (gotFrame) {
         std::lock_guard<std::mutex> lk(m_);
-        latest_ = f.clone();
+        f.copyTo(latest_);
         std::cout << "Constructor: première frame OK "
             << f.cols << "x" << f.rows
             << " type=" << f.type()
@@ -164,7 +164,7 @@ bool Camera::startCapture(double fps)
 
     {
         std::lock_guard<std::mutex> lk(m_);
-        latest_ = test.clone();
+        test.copyTo(latest_);
     }
 
     std::cout << "startCapture: première frame OK "
@@ -185,7 +185,6 @@ void Camera::stopCapture() {
 
 void Camera::captureLoop_()
 {
-    bool calibrationMode = true; // mets false si tu veux activer via une touche
     cv::Mat frame;
     auto old_time = std::chrono::steady_clock::now();
     auto new_time = std::chrono::steady_clock::now();
@@ -211,7 +210,9 @@ void Camera::captureLoop_()
         // 1) Si on a calibr�, on peut undistort pour stabiliser les mesures
         if (isCalibrated_ && undistortEnabled_) undistordFrame_(frame, view);
 
-        if (!isCalibrated_ && !view.empty())
+        // La recherche d'echiquier est couteuse : elle est reservee au mode calibration.
+        // En mode autonome, on charge uniquement une calibration existante depuis le fichier .ini.
+        if (calibrationMode_.load() && !isCalibrated_ && !view.empty())
         {
             auto objTemplate = makeChessboard3D(EchiquierSize_, calib_squareSize_);
             if (!objTemplate.empty())
@@ -236,7 +237,7 @@ void Camera::captureLoop_()
         }
 
         std::lock_guard<std::mutex> lk(m_);
-        latest_ = frame.clone();
+        frame.copyTo(latest_);
 
         if (recording_ && writer_.isOpened()) writer_.write(frame);
 
@@ -251,7 +252,7 @@ void Camera::captureLoop_()
 bool Camera::getLatestFrame(cv::Mat& out) {
     std::lock_guard<std::mutex> lk(m_);
     if (latest_.empty()) return false;
-    out = latest_.clone();
+    latest_.copyTo(out);
     return true;
 }
 
@@ -305,7 +306,6 @@ bool Camera::calibrateCamera(bool savePicCalib , std::vector<cv::Point3f> objTem
     cv::Mat gray;
     cv::Mat view;
     view = frame;
-
 
     cv::cvtColor(view, gray, cv::COLOR_BGR2GRAY);
 
@@ -430,7 +430,8 @@ bool Camera::loadBallDetectorONNX(const std::string& onnxPath, int inputSize)
         }
 
         ortOpts_ = Ort::SessionOptions{};
-        ortOpts_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+        ortOpts_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        ortOpts_.SetExecutionMode(ORT_SEQUENTIAL);
 
         // Pour Pi4 / CPU : �vite trop de threads
         ortOpts_.SetIntraOpNumThreads(2);
@@ -543,16 +544,12 @@ void Camera::decodeDetections_(const cv::Mat& outRaw, const LetterboxInfo& info,
     // 2) YOLOv5-like brut :      (1, N, 5+nc) -> [cx,cy,w,h, obj, cls0, cls1, ...]
     // 3) Export NMS/end-to-end : (1, N, 6)    -> [x1,y1,x2,y2, score, class]
     // 4) Variante NMS :          (1, N, 6)    -> [x1,y1,x2,y2, class, score]
-
-
     boxes.clear();
     scores.clear();
 
     if (outRaw.empty()) {
         return;
     }
-
-
     cv::Mat out;
 
     if (outRaw.dims == 3) {
@@ -701,35 +698,47 @@ BallColor Camera::classifyColorHSV_(const cv::Mat& frame, const cv::Rect& box) c
     cv::Rect b = box & cv::Rect(0, 0, frame.cols, frame.rows);
     if (b.area() <= 0) return BallColor::Unknown;
 
-    cv::Mat roi = frame(b);
+    // On ne classe pas la couleur sur toute la bbox : les bords contiennent souvent
+    // de l'eau, des reflets et du motion blur. Le coeur de la balle est plus stable.
+    const int shrinkX = std::max(1, b.width / 6);
+    const int shrinkY = std::max(1, b.height / 6);
+    cv::Rect core(b.x + shrinkX, b.y + shrinkY,
+                  std::max(1, b.width - 2 * shrinkX),
+                  std::max(1, b.height - 2 * shrinkY));
+    core &= cv::Rect(0, 0, frame.cols, frame.rows);
+    if (core.area() <= 0) return BallColor::Unknown;
+
+    cv::Mat roi = frame(core);
     cv::Mat hsv;
     cv::cvtColor(roi, hsv, cv::COLOR_BGR2HSV);
 
-    cv::Mat red1, red2, red, blue, white;
+    cv::Mat red1, red2, red, orange, blue, white;
 
-    // Rouge (2 plages en Hue)
-    cv::inRange(hsv, cv::Scalar(0, 80, 80), cv::Scalar(10, 255, 255), red1);
-    cv::inRange(hsv, cv::Scalar(170, 80, 80), cv::Scalar(179, 255, 255), red2);
+    // OpenCV: H dans [0;179]. Orange se situe typiquement entre rouge et jaune.
+    cv::inRange(hsv, cv::Scalar(0,   90,  70), cv::Scalar(7,   255, 255), red1);
+    cv::inRange(hsv, cv::Scalar(172, 90,  70), cv::Scalar(179, 255, 255), red2);
     red = red1 | red2;
 
-    // Bleu
-    cv::inRange(hsv, cv::Scalar(95, 80, 80), cv::Scalar(130, 255, 255), blue);
+    cv::inRange(hsv, cv::Scalar(8, 70, 70), cv::Scalar(28, 255, 255), orange);
+    cv::inRange(hsv, cv::Scalar(95, 70, 60), cv::Scalar(130, 255, 255), blue);
+    cv::inRange(hsv, cv::Scalar(0, 0, 150), cv::Scalar(179, 65, 255), white);
 
-    // Blanc : saturation faible + valeur �lev�e
-    cv::inRange(hsv, cv::Scalar(0, 0, 170), cv::Scalar(179, 60, 255), white);
+    auto ratio = [&](const cv::Mat& m) -> float {
+        const int denom = std::max(1, m.rows * m.cols);
+        return static_cast<float>(cv::countNonZero(m)) / static_cast<float>(denom);
+    };
 
-    auto ratio = [&](const cv::Mat& m) {
-        return (float)cv::countNonZero(m) / (float)(m.rows * m.cols);
-        };
+    const float rR = ratio(red);
+    const float rO = ratio(orange);
+    const float rB = ratio(blue);
+    const float rW = ratio(white);
 
-    float rR = ratio(red);
-    float rB = ratio(blue);
-    float rW = ratio(white);
-
-    // seuils � ajuster selon tes balles r�elles
-    if (rR > 0.06f) return BallColor::Red;
-    if (rB > 0.06f) return BallColor::Blue;
-    if (rW > 0.10f) return BallColor::White;
+    // Ordre volontaire : l'orange peut parfois deborder sur le rouge avec les reflets.
+    // On exige un ratio legerement dominant pour eviter de classer orange une balle rouge.
+    if (rO > 0.08f && rO >= (rR * 0.85f)) return BallColor::Orange;
+    if (rR > 0.08f) return BallColor::Red;
+    if (rB > 0.08f) return BallColor::Blue;
+    if (rW > 0.12f) return BallColor::White;
     return BallColor::Unknown;
 }
 

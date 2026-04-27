@@ -9,6 +9,7 @@ namespace CATJ_robot {
     ModeCourse::ModeCourse() : cfg_{}
     {
         counts_[BallType::PingPongOrange] = 0;
+        counts_[BallType::PingPongWhite] = 0;
         counts_[BallType::PiscineRouge] = 0;
         counts_[BallType::PiscineAutre] = 0;
     }
@@ -16,6 +17,7 @@ namespace CATJ_robot {
     ModeCourse::ModeCourse(const Config& cfg) : cfg_(cfg)
     {
         counts_[BallType::PingPongOrange] = 0;
+        counts_[BallType::PingPongWhite] = 0;
         counts_[BallType::PiscineRouge] = 0;
         counts_[BallType::PiscineAutre] = 0;
     }
@@ -50,24 +52,23 @@ namespace CATJ_robot {
             return;
         }
 
-        bool closeBall = false;
-        std::vector<RobotBall> collectedCandidates;
+        bool shouldCatch = false;
         for (const auto& b : visibleBalls) {
-            if (b.distanceM < cfg_.distCollecteRapideM) closeBall = true;
-            if (b.distanceM < cfg_.distBalleCollecteeM) collectedCandidates.push_back(b);
-        }
-
-        if (closeBall) {
-            board.sendCatch();
+            const bool validKind = !cfg_.catchOnlyPositiveTargets || b.isCollectible();
+            const bool inDistanceGate = b.distanceM > 0.0f && b.distanceM < cfg_.distCollecteRapideM;
+            const bool inAngleGate = std::fabs(b.angleDeg) <= cfg_.catchAngleGateDeg;
+            if (validKind && inDistanceGate && inAngleGate) {
+                shouldCatch = true;
+                break;
+            }
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (!collectedCandidates.empty() && (now - lastCollect_) >= cfg_.antiRebond) {
-            auto best = std::max_element(collectedCandidates.begin(), collectedCandidates.end(),
-                [](const RobotBall& a, const RobotBall& b) { return a.confidence < b.confidence; });
-            registerBall_(best->type);
+        if (shouldCatch && (now - lastCollect_) >= cfg_.antiRebond) {
+            // Cette commande declenche le mecanisme de collecte. Le score n'est plus
+            // incremente ici : seul le retour carte mere valide une balle ramassee.
+            board.sendCatch();
             lastCollect_ = now;
-            board.sendObjective(score_);
         }
 
         if (allowPontoonBonus_ && !retourPonton_ && rearDistanceMm > 0.0f && rearDistanceMm < 300.0f) {
@@ -77,6 +78,35 @@ namespace CATJ_robot {
         }
     }
 
+    void ModeCourse::processMotherboardStatus(const MotherboardStatus& status, MotherboardLink& board)
+    {
+        if (!running_) return;
+
+        if (status.scoreValid) {
+            setScoreFromBoard_(status.score);
+        }
+        else if (status.scoreDeltaValid) {
+            if (!firstBall_ && status.scoreDelta != 0) {
+                firstBall_ = true;
+                score_ += cfg_.scoreBaseCollecte;
+            }
+            score_ += status.scoreDelta;
+        }
+        else if (status.balle != BallKind::Unknown) {
+            registerMotherboardBall_(status.balle);
+        }
+
+        if (status.scoreValid || status.scoreDeltaValid || status.balle != BallKind::Unknown) {
+            board.sendObjective(score_);
+        }
+    }
+
+    bool ModeCourse::lockCollection(MotherboardLink& board)
+    {
+        verrouille_ = true;
+        return board.sendLockCollector();
+    }
+
     void ModeCourse::registerBall_(BallType type)
     {
         if (type == BallType::Unknown) return;
@@ -84,8 +114,45 @@ namespace CATJ_robot {
             firstBall_ = true;
             score_ += cfg_.scoreBaseCollecte;
         }
-        score_ += BallLogic::scoreFor(type);
+        switch (type) {
+        case BallType::PingPongOrange: score_ += cfg_.scorePingPongOrange; break;
+        case BallType::PingPongWhite:  score_ += cfg_.scorePingPongWhite; break;
+        case BallType::PiscineRouge:   score_ += cfg_.scorePiscineRed; break;
+        case BallType::PiscineAutre:   score_ += cfg_.scorePiscineOther; break;
+        case BallType::Unknown:
+        default: break;
+        }
         counts_[type] += 1;
+    }
+
+    void ModeCourse::registerMotherboardBall_(BallKind kind)
+    {
+        if (kind == BallKind::Unknown) return;
+        if (!firstBall_) {
+            firstBall_ = true;
+            score_ += cfg_.scoreBaseCollecte;
+        }
+        score_ += scoreForBallKind_(kind);
+    }
+
+    void ModeCourse::setScoreFromBoard_(int score)
+    {
+        score_ = score;
+        if (score_ != 0) firstBall_ = true;
+    }
+
+    int ModeCourse::scoreForBallKind_(BallKind kind) const
+    {
+        switch (kind) {
+        case BallKind::Score: return cfg_.scoreGenericPositive;
+        case BallKind::Trash: return cfg_.scoreGenericTrash;
+        case BallKind::PingPongOrange: return cfg_.scorePingPongOrange;
+        case BallKind::PingPongWhite: return cfg_.scorePingPongWhite;
+        case BallKind::PiscineRed: return cfg_.scorePiscineRed;
+        case BallKind::PiscineOther: return cfg_.scorePiscineOther;
+        case BallKind::Unknown:
+        default: return 0;
+        }
     }
 
     ModeCourseDemiTour::ModeCourseDemiTour() : cfg_{} {}
@@ -128,6 +195,8 @@ namespace CATJ_robot {
         contacts_ = 0;
         homeSeenCount_ = 0;
         searchTurnSign_ = 1;
+        startHeadingValid_ = false;
+        startHeadingDeg_ = 0.0f;
         state_ = State::StraightOut;
         lastMove_ = MoveCommand::Stop;
         lastSpeedPct_ = -1;
@@ -197,9 +266,30 @@ namespace CATJ_robot {
         }
     }
 
-    void ModeCourseDemiTour::update(const CourseLidarDirections& d, MotherboardLink& board)
+    float ModeCourseDemiTour::normalizeAngleDeg_(float angleDeg)
+    {
+        while (angleDeg > 180.0f) angleDeg -= 360.0f;
+        while (angleDeg < -180.0f) angleDeg += 360.0f;
+        return angleDeg;
+    }
+
+    float ModeCourseDemiTour::headingCorrection_(float headingDeg, float targetDeg) const
+    {
+        const float err = normalizeAngleDeg_(targetDeg - headingDeg);
+        if (std::fabs(err) <= cfg_.headingDeadbandDeg) return 0.0f;
+        return std::clamp(err * cfg_.headingKp, -cfg_.maxHeadingCorrectionDeg, cfg_.maxHeadingCorrectionDeg);
+    }
+
+    void ModeCourseDemiTour::update(const CourseLidarDirections& d, MotherboardLink& board, std::optional<float> headingDeg)
     {
         if (!running_) return;
+
+        if (cfg_.useGyroHeading && headingDeg && std::isfinite(*headingDeg)) {
+            if (!startHeadingValid_) {
+                startHeadingValid_ = true;
+                startHeadingDeg_ = normalizeAngleDeg_(*headingDeg);
+            }
+        }
 
         registerContact_(d);
 
@@ -234,7 +324,10 @@ namespace CATJ_robot {
             }
 
             float turn = 0.0f;
-            if (isFinitePositive_(d.leftMm) && isFinitePositive_(d.rightMm)) {
+            if (cfg_.useGyroHeading && startHeadingValid_ && headingDeg) {
+                turn = headingCorrection_(*headingDeg, startHeadingDeg_);
+            }
+            else if (isFinitePositive_(d.leftMm) && isFinitePositive_(d.rightMm)) {
                 const float diff = d.leftMm - d.rightMm;
                 if (std::fabs(diff) >= cfg_.straightWallBalanceMm) {
                     turn = (diff > 0.0f) ? +cfg_.straightHeadingCorrectionDeg : -cfg_.straightHeadingCorrectionDeg;
@@ -269,6 +362,14 @@ namespace CATJ_robot {
         {
             const float counterTurn = cfg_.clockwiseTurn ? -cfg_.counterTurnDeg : +cfg_.counterTurnDeg;
             setMotion_(board, MoveCommand::Forward, cfg_.speedCounterPct, counterTurn);
+            if (cfg_.useGyroHeading && startHeadingValid_ && headingDeg) {
+                const float returnHeading = normalizeAngleDeg_(startHeadingDeg_ + 180.0f);
+                const float err = std::fabs(normalizeAngleDeg_(returnHeading - *headingDeg));
+                if (err <= cfg_.returnHeadingToleranceDeg) {
+                    transitionTo_(State::ReturnHome, board);
+                    break;
+                }
+            }
             if (now - stateTs_ >= cfg_.counterDuration) {
                 transitionTo_(State::ReturnHome, board);
             }
@@ -283,7 +384,11 @@ namespace CATJ_robot {
             }
 
             float turn = 0.0f;
-            if (isFinitePositive_(d.leftMm) && isFinitePositive_(d.rightMm)) {
+            if (cfg_.useGyroHeading && startHeadingValid_ && headingDeg) {
+                const float returnHeading = normalizeAngleDeg_(startHeadingDeg_ + 180.0f);
+                turn = headingCorrection_(*headingDeg, returnHeading);
+            }
+            else if (isFinitePositive_(d.leftMm) && isFinitePositive_(d.rightMm)) {
                 const float diff = d.leftMm - d.rightMm;
                 if (std::fabs(diff) >= cfg_.straightWallBalanceMm) {
                     turn = (diff > 0.0f) ? +cfg_.straightHeadingCorrectionDeg : -cfg_.straightHeadingCorrectionDeg;

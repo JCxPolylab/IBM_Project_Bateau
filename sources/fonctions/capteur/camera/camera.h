@@ -56,7 +56,7 @@ namespace CATJ_camera {
         return CameraBackend::Auto;
     }
 
-    enum class BallColor { Unknown, Red, Blue, White };
+    enum class BallColor { Unknown, Red, Blue, White, Orange };
     enum class BallDecision { Unknown, Target, Ignore };
 
     struct BallDetection {
@@ -98,6 +98,8 @@ namespace CATJ_camera {
         bool loadBallDetectorONNX(const std::string& onnxPath, int inputSize = 640);
         void setThresholds(float conf, float nms) { confTh_ = conf; nmsTh_ = nms; }
         void setColorDecision(BallColor target, BallColor ignore) { targetColor_ = target; ignoreColor_ = ignore; }
+        void setCalibrationMode(bool enabled) { calibrationMode_ = enabled; }
+        bool calibrationMode() const { return calibrationMode_.load(); }
 
         // Ex�cute IA (si net charg�) + couleur HSV
         bool detectBalls(std::vector<BallDetection>& out);
@@ -219,6 +221,7 @@ namespace CATJ_camera {
         float confTh_ = 0.35f;
         float nmsTh_ = 0.45f;
 		std::atomic<int> keyPolled_ = -1;
+        std::atomic<bool> calibrationMode_{ false };
 
         BallColor targetColor_ = BallColor::Red;   
         BallColor ignoreColor_ = BallColor::Blue;  

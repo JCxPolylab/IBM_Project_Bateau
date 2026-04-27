@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <iomanip>
@@ -43,20 +44,22 @@ namespace {
     std::string ballColorToLabel(CATJ_camera::BallColor c)
     {
         switch (c) {
-        case CATJ_camera::BallColor::Red:   return "red_ball";
-        case CATJ_camera::BallColor::Blue:  return "blue_ball";
-        case CATJ_camera::BallColor::White: return "white_ball";
-        default:                            return "unknown";
+        case CATJ_camera::BallColor::Red:    return "red_ball";
+        case CATJ_camera::BallColor::Blue:   return "blue_ball";
+        case CATJ_camera::BallColor::White:  return "white_ball";
+        case CATJ_camera::BallColor::Orange: return "orange_ball";
+        default:                             return "unknown";
         }
     }
 
     cv::Scalar ballColorToScalar(CATJ_camera::BallColor c)
     {
         switch (c) {
-        case CATJ_camera::BallColor::Red:   return cv::Scalar(30, 30, 230);
-        case CATJ_camera::BallColor::Blue:  return cv::Scalar(230, 30, 30);
-        case CATJ_camera::BallColor::White: return cv::Scalar(220, 220, 220);
-        default:                            return cv::Scalar(60, 200, 60);
+        case CATJ_camera::BallColor::Red:    return cv::Scalar(30, 30, 230);
+        case CATJ_camera::BallColor::Blue:   return cv::Scalar(230, 30, 30);
+        case CATJ_camera::BallColor::White:  return cv::Scalar(220, 220, 220);
+        case CATJ_camera::BallColor::Orange: return cv::Scalar(0, 140, 255);
+        default:                             return cv::Scalar(60, 200, 60);
         }
     }
 
@@ -144,7 +147,8 @@ namespace {
 
         if (s == "red" || s == "rouge") return CATJ_camera::BallColor::Red;
         if (s == "blue" || s == "bleu") return CATJ_camera::BallColor::Blue;
-        if (s == "white" || s == "blanc") return CATJ_camera::BallColor::White;
+        if (s == "white" || s == "blanc" || s == "blanche") return CATJ_camera::BallColor::White;
+        if (s == "orange") return CATJ_camera::BallColor::Orange;
         return CATJ_camera::BallColor::Unknown;
     }
 
@@ -158,6 +162,7 @@ namespace {
         const int minc = std::min({ r, g, b });
 
         if (maxc >= 180 && (maxc - minc) <= 45) return CATJ_camera::BallColor::White;
+        if (r >= 140 && g >= 60 && g <= 190 && b <= 100 && r > g + 25) return CATJ_camera::BallColor::Orange;
         if (r >= 100 && r > g + 30 && r > b + 30) return CATJ_camera::BallColor::Red;
         if (b >= 100 && b > r + 20 && b > g + 20) return CATJ_camera::BallColor::Blue;
         return CATJ_camera::BallColor::Unknown;
@@ -184,6 +189,7 @@ namespace {
         case CATJ_camera::BallColor::Red: return "red";
         case CATJ_camera::BallColor::Blue: return "blue";
         case CATJ_camera::BallColor::White: return "white";
+        case CATJ_camera::BallColor::Orange: return "orange";
         default: return "unknown";
         }
     }
@@ -223,7 +229,16 @@ namespace {
         }
     }
 
-
+    static void updateHeadingFromStatus_(const CATJ_robot::MotherboardStatus& st,
+        std::optional<float>& headingDeg)
+    {
+        if (st.headingValid && std::isfinite(st.headingDeg)) {
+            float h = st.headingDeg;
+            while (h > 180.0f) h -= 360.0f;
+            while (h < -180.0f) h += 360.0f;
+            headingDeg = h;
+        }
+    }
 
 
     static int hexVal_(char c)
@@ -415,12 +430,14 @@ namespace {
         const bool allowNetworkControl = iniFile.getOr("WEB", "allow network control", true);
         const int telemetryPeriodMs = iniFile.getOr("WEB", "telemetry period ms", 100);
         const int jpegQuality = iniFile.getOr("WEB", "jpeg quality", 80);
+        const int webVideoFps = std::clamp(iniFile.getOr("WEB", "video fps", 12), 1, 30);
+        const int webLoopSleepMs = std::clamp(iniFile.getOr("WEB", "loop sleep ms", 15), 1, 100);
+        const int webFramePeriodMs = std::max(1, 1000 / webVideoFps);
 
         // stream camera : permet un remote LIDAR only sans dépendre de la caméra.
         // vision enabled : active / désactive la détection + overlay.
         const bool streamCamera = iniFile.getOr("WEB", "stream camera", true);
         const bool visionEnabled = iniFile.getOr("WEB", "vision enabled", (baseMode == CATJ_utility::programme_mode::camera));
-
 
         // --- LIDAR ---
         const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
@@ -520,6 +537,8 @@ namespace {
             js << "\"allow_network_control\":" << (allowNetworkControl ? "true" : "false") << ',';
             js << "\"telemetry_period_ms\":" << telemetryPeriodMs << ',';
             js << "\"jpeg_quality\":" << jpegQuality << ',';
+            js << "\"video_fps\":" << webVideoFps << ',';
+            js << "\"loop_sleep_ms\":" << webLoopSleepMs << ',';
             js << "\"image_codec\":\"" << esc(codec) << "\",";
 
             js << "\"camera\":{";
@@ -676,7 +695,7 @@ namespace {
 #endif
             return r;
         });
-
+        
         bridge.server().registerPost("/api/bus_i2c_reg_write", [&](const CATJ_webui_rt::HttpRequest& req) {
             const auto f = parseUrlEncoded_(req.body);
             const std::string deviceSpec = f.count("device_spec") ? f.at("device_spec") : std::string("/dev/i2c-1@0x42");
@@ -868,8 +887,14 @@ namespace {
         int manualTiltDeg = 0;
 
         auto lastTs = std::chrono::steady_clock::now();
+        auto nextVideoFrameTs = std::chrono::steady_clock::now();
+        std::vector<CATJ_robot_web::Detection> cachedWebDets;
 
         std::cout << "Entrée dans la boucle principale. Appuyez sur Ctrl+C pour quitter." << std::endl;
+        std::cout << "Web perf: video_fps=" << webVideoFps
+                  << " jpeg_quality=" << jpegQuality
+                  << " loop_sleep_ms=" << webLoopSleepMs
+                  << " ai_fps=" << cam.getAiFps() << std::endl;
 
         bool shouldQuit = false;
 
@@ -1042,31 +1067,39 @@ namespace {
                 if (shouldQuit) break;
             }
 
+            const auto loopNow = std::chrono::steady_clock::now();
+            const bool videoFrameDue = streamCamera && camOk && (loopNow >= nextVideoFrameTs);
+            const bool needCalibrationFrame = (baseMode == CATJ_utility::programme_mode::calibration) && !calibObjTemplate.empty();
+
+            if (videoFrameDue) {
+                nextVideoFrameTs = loopNow + std::chrono::milliseconds(webFramePeriodMs);
+            }
+
             cv::Mat frame;
             bool haveFrame = false;
-            if (streamCamera && camOk) {
+            if ((videoFrameDue || needCalibrationFrame) && streamCamera && camOk) {
                 haveFrame = cam.getLatestFrame(frame);
             }
 
-
-            if (haveFrame && baseMode == CATJ_utility::programme_mode::calibration && !calibObjTemplate.empty()) {
+            if (haveFrame && needCalibrationFrame) {
                 if (cam.calibrateCamera(true, calibObjTemplate, frame, &calibOut) && !calibOut.empty()) {
                     frame = calibOut;
                 }
             }
 
-            std::vector<CATJ_robot_web::Detection> webDets;
-            if (haveFrame && visionEnabled) {
+            std::vector<CATJ_robot_web::Detection> webDets = cachedWebDets;
+            if (visionEnabled && camOk) {
                 std::vector<CATJ_camera::BallDetection> dets;
                 cam.detectBalls(dets);
-                webDets = convertDetections(dets);
-                bridge.updateDetections(webDets);
+                cachedWebDets = convertDetections(dets);
+                webDets = cachedWebDets;
+                bridge.updateDetections(cachedWebDets);
             }
 
             telem = bridge.telemetry();
             telem.lidar.enabled = lidarEnabled;
 
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = loopNow;
             const double dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTs).count() / 1000.0;
             lastTs = now;
             if (dt > 1e-6) {
@@ -1124,12 +1157,16 @@ namespace {
                     telem.statusText = "auto lidar avoidance";
                     telem.autoState = goLeft ? "avoid left" : "avoid right";
                 }
-                else if (!webDets.empty() && telem.missionEnabled && haveFrame) {
+                else if (!webDets.empty() && telem.missionEnabled) {
                     const auto& best = *std::max_element(webDets.begin(), webDets.end(),
                         [](const auto& a, const auto& b) { return a.confidence < b.confidence; });
 
+                    const auto [camW, camH] = cam.getResolution();
+                    (void)camH;
                     const double boxCx = best.box.x + best.box.width * 0.5;
-                    const double imageCx = frame.cols * 0.5;
+                    const double imageCx = (haveFrame && frame.cols > 0)
+                        ? frame.cols * 0.5
+                        : std::max(1, camW) * 0.5;
                     const double err = (boxCx - imageCx) / std::max(1.0, imageCx);
                     const int turn = std::clamp(static_cast<int>(err * 70.0), -35, 35);
                     const int base = 35;
@@ -1159,12 +1196,12 @@ namespace {
 
             bridge.updateTelemetry(telem);
 
-            if (haveFrame) {
+            if (videoFrameDue && haveFrame) {
                 if (visionEnabled) bridge.updateVideoFrame(frame, webDets);
                 else bridge.updateVideoFrame(frame);
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(webLoopSleepMs));
         }
 
         std::cout << "Arrêt du programme..." << std::endl;
@@ -1312,19 +1349,32 @@ namespace {
         ballCfg.minDistanceM = cfg.ballMinDistanceM;
         ballCfg.maxDistanceM = cfg.ballMaxDistanceM;
         ballCfg.orangeDiameterM = cfg.ballOrangeDiameterM;
+        ballCfg.whiteDiameterM = iniFile.getOr("RAMASSAGE", "ball white diameter m", ballCfg.whiteDiameterM);
         ballCfg.piscineDiameterM = cfg.ballPiscineDiameterM;
         ballCfg.hfovDeg = cfg.hfovDeg;
+        ballCfg.whiteIsPingPong = iniFile.getOr("RAMASSAGE", "white is pingpong", ballCfg.whiteIsPingPong);
+        ballCfg.scorePingPongOrange = iniFile.getOr("RAMASSAGE", "score pingpong orange", ballCfg.scorePingPongOrange);
+        ballCfg.scorePingPongWhite = iniFile.getOr("RAMASSAGE", "score pingpong white", ballCfg.scorePingPongWhite);
+        ballCfg.scorePiscineRouge = iniFile.getOr("RAMASSAGE", "score piscine red", ballCfg.scorePiscineRouge);
+        ballCfg.scorePiscineAutre = iniFile.getOr("RAMASSAGE", "score piscine other", ballCfg.scorePiscineAutre);
 
         CATJ_robot::BallLogic ballLogic(ballCfg);
 
         CATJ_robot::ModeCourse::Config courseCfg;
         courseCfg.distCollecteRapideM = iniFile.getOr("RAMASSAGE", "collect fast distance m", 0.50f);
-        courseCfg.distBalleCollecteeM = iniFile.getOr("RAMASSAGE", "collect confirm distance m", 0.20f);
+        courseCfg.catchAngleGateDeg = iniFile.getOr("RAMASSAGE", "catch angle gate deg", courseCfg.catchAngleGateDeg);
+        courseCfg.catchOnlyPositiveTargets = iniFile.getOr("RAMASSAGE", "catch only positive targets", courseCfg.catchOnlyPositiveTargets);
         courseCfg.scoreBaseCollecte = iniFile.getOr("RAMASSAGE", "score base collecte", 20);
         courseCfg.scoreBonusPonton = iniFile.getOr("RAMASSAGE", "score bonus ponton", 100);
         courseCfg.scoreBonusAfficheur = iniFile.getOr("RAMASSAGE", "score bonus afficheur", 50);
         courseCfg.conveyorNormalPct = iniFile.getOr("RAMASSAGE", "conveyor normal pct", 80);
         courseCfg.conveyorRapidePct = iniFile.getOr("RAMASSAGE", "conveyor rapide pct", 100);
+        courseCfg.scoreGenericPositive = iniFile.getOr("RAMASSAGE", "score generic positive", courseCfg.scoreGenericPositive);
+        courseCfg.scoreGenericTrash = iniFile.getOr("RAMASSAGE", "score generic trash", courseCfg.scoreGenericTrash);
+        courseCfg.scorePingPongOrange = iniFile.getOr("RAMASSAGE", "score pingpong orange", courseCfg.scorePingPongOrange);
+        courseCfg.scorePingPongWhite = iniFile.getOr("RAMASSAGE", "score pingpong white", courseCfg.scorePingPongWhite);
+        courseCfg.scorePiscineRed = iniFile.getOr("RAMASSAGE", "score piscine red", courseCfg.scorePiscineRed);
+        courseCfg.scorePiscineOther = iniFile.getOr("RAMASSAGE", "score piscine other", courseCfg.scorePiscineOther);
         courseCfg.antiRebond = std::chrono::milliseconds(iniFile.getOr("RAMASSAGE", "anti rebond ms", 1500));
 
         CATJ_robot::ModeCourse course(courseCfg);
@@ -1361,6 +1411,7 @@ namespace {
         auto tNextHeartbeat = tStart;
 
         bool shouldQuit = false;
+        std::optional<float> lastHeadingDeg;
 
         while (!shouldQuit) {
             const auto now = std::chrono::steady_clock::now();
@@ -1389,13 +1440,15 @@ namespace {
                 sectors = lidar.snapshot().sectors;
             }
 
-            course.update(robotBalls, std::isfinite(sectors.rearMm) ? sectors.rearMm : -1.0f, board);
-
             while (auto st = board.readStatusOnce(1)) {
+                updateHeadingFromStatus_(*st, lastHeadingDeg);
+                course.processMotherboardStatus(*st, board);
                 if (!st->rawLine.empty()) {
                     std::cout << "[MB] " << st->rawLine << std::endl;
                 }
             }
+
+            course.update(robotBalls, std::isfinite(sectors.rearMm) ? sectors.rearMm : -1.0f, board);
 
             const auto bestTarget = ballLogic.bestTarget(robotBalls);
 
@@ -1503,12 +1556,24 @@ namespace {
             std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, cfg.loopSleepMs)));
         }
 
+        const bool lockSent = course.lockCollection(board);
+        bool lockAckOk = false;
+        for (int i = 0; i < 10; ++i) {
+            if (auto st = board.readStatusOnce(20)) {
+                if (st->lockAck == CATJ_robot::LockAck::Ok) lockAckOk = true;
+                if (!st->rawLine.empty()) std::cout << "[MB] " << st->rawLine << std::endl;
+            }
+            if (lockAckOk) break;
+        }
+
         course.stop();
         applyMotionCommand_(board, motionCache, MotionCommandMain_{});
         board.sendStopAll();
         board.sendMode(CATJ_robot::RobotMode::Stop);
 
-        std::cout << "Fin RAMASSAGE | score estimé=" << course.score()
+        std::cout << "Fin RAMASSAGE | score=" << course.score()
+            << " | verrouillage_cmd=" << (lockSent ? "envoyee" : "echec_envoi")
+            << " | verrouillage_ack=" << (lockAckOk ? "OK" : "non_recu")
             << " | retour ponton=" << (course.pontonDetected() ? "OUI" : "NON")
             << std::endl;
 
@@ -1541,7 +1606,7 @@ namespace {
 
         const bool boardEnabled = iniFile.getOr("MOTHERBOARD", "enabled", true);
         const std::string boardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
-        const int boardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 460800);
+        const int boardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 115200);
         const int boardReadTimeoutMs = iniFile.getOr("MOTHERBOARD", "read timeout ms", 20);
         const int boardWriteTimeoutMs = iniFile.getOr("MOTHERBOARD", "write timeout ms", 50);
         const int boardStatusTimeoutMs = iniFile.getOr("MOTHERBOARD", "status timeout ms", 10);
@@ -1601,6 +1666,12 @@ namespace {
         modeCfg.wallToleranceMm = iniFile.getOr("LABYRINTHE", "wall tolerance mm", modeCfg.wallToleranceMm);
         modeCfg.turnAngleDeg = iniFile.getOr("LABYRINTHE", "turn angle deg", modeCfg.turnAngleDeg);
         modeCfg.wallCorrectionDeg = iniFile.getOr("LABYRINTHE", "wall correction deg", modeCfg.wallCorrectionDeg);
+        modeCfg.useGyroWhenNoWall = iniFile.getOr("LABYRINTHE", "use gyro when no wall", modeCfg.useGyroWhenNoWall);
+        modeCfg.requireHeadingForFinish = iniFile.getOr("LABYRINTHE", "require heading for finish", modeCfg.requireHeadingForFinish);
+        modeCfg.headingKp = iniFile.getOr("LABYRINTHE", "heading kp", modeCfg.headingKp);
+        modeCfg.maxHeadingCorrectionDeg = iniFile.getOr("LABYRINTHE", "max heading correction deg", modeCfg.maxHeadingCorrectionDeg);
+        modeCfg.headingDeadbandDeg = iniFile.getOr("LABYRINTHE", "heading deadband deg", modeCfg.headingDeadbandDeg);
+        modeCfg.finishHeadingToleranceDeg = iniFile.getOr("LABYRINTHE", "finish heading tolerance deg", modeCfg.finishHeadingToleranceDeg);
         modeCfg.speedPct = iniFile.getOr("LABYRINTHE", "speed pct", modeCfg.speedPct);
         modeCfg.avoidSpeedPct = iniFile.getOr("LABYRINTHE", "avoid speed pct", modeCfg.avoidSpeedPct);
         modeCfg.minRunBeforeReturnSec = iniFile.getOr("LABYRINTHE", "min run before return sec", modeCfg.minRunBeforeReturnSec);
@@ -1628,6 +1699,7 @@ namespace {
 
         bool shouldQuit = false;
         bool timedOut = false;
+        std::optional<float> lastHeadingDeg;
 
         while (!shouldQuit && laby.running()) {
             const auto now = std::chrono::steady_clock::now();
@@ -1647,10 +1719,14 @@ namespace {
             d.frontLeftMm = snap.sectors.frontLeftMm;
             d.rearMm = snap.sectors.rearMm;
 
-            laby.update(d, board);
+            while (auto status = board.readStatusOnce(1)) {
+                updateHeadingFromStatus_(*status, lastHeadingDeg);
+                if (!status->rawLine.empty()) {
+                    std::cout << "[MB] " << status->rawLine << std::endl;
+                }
+            }
 
-            auto status = board.readStatusOnce(1);
-            (void)status;
+            laby.update(d, board, lastHeadingDeg);
 
             if (now >= tNextLog) {
                 std::cout << "[LABYRINTHE] t=" << std::fixed << std::setprecision(1) << elapsedSec
@@ -1660,7 +1736,8 @@ namespace {
                     << "mm | right=" << (std::isfinite(d.rightMm) ? d.rightMm : 0.0f)
                     << "mm | left=" << (std::isfinite(d.leftMm) ? d.leftMm : 0.0f)
                     << "mm | rear=" << (std::isfinite(d.rearMm) ? d.rearMm : 0.0f)
-                    << "mm" << std::endl;
+                    << "mm | heading=" << (lastHeadingDeg ? *lastHeadingDeg : 0.0f)
+                    << (lastHeadingDeg ? "deg" : "deg[n/a]") << std::endl;
                 tNextLog = now + std::chrono::milliseconds(runtimeCfg.logPeriodMs);
             }
 
@@ -1730,7 +1807,7 @@ namespace {
 
         const bool boardEnabled = iniFile.getOr("MOTHERBOARD", "enabled", true);
         const std::string boardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
-        const int boardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 460800);
+        const int boardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 115200);
         const int boardReadTimeoutMs = iniFile.getOr("MOTHERBOARD", "read timeout ms", 20);
         const int boardWriteTimeoutMs = iniFile.getOr("MOTHERBOARD", "write timeout ms", 50);
         const int boardStatusTimeoutMs = iniFile.getOr("MOTHERBOARD", "status timeout ms", 10);
@@ -1802,6 +1879,11 @@ namespace {
         modeCfg.speedBackupPct = iniFile.getOr("COURSE", "speed backup pct", modeCfg.speedBackupPct);
         modeCfg.speedSearchPct = iniFile.getOr("COURSE", "speed search pct", modeCfg.speedSearchPct);
         modeCfg.clockwiseTurn = iniFile.getOr("COURSE", "clockwise turn", modeCfg.clockwiseTurn);
+        modeCfg.useGyroHeading = iniFile.getOr("COURSE", "use gyro heading", modeCfg.useGyroHeading);
+        modeCfg.headingKp = iniFile.getOr("COURSE", "heading kp", modeCfg.headingKp);
+        modeCfg.maxHeadingCorrectionDeg = iniFile.getOr("COURSE", "max heading correction deg", modeCfg.maxHeadingCorrectionDeg);
+        modeCfg.headingDeadbandDeg = iniFile.getOr("COURSE", "heading deadband deg", modeCfg.headingDeadbandDeg);
+        modeCfg.returnHeadingToleranceDeg = iniFile.getOr("COURSE", "return heading tolerance deg", modeCfg.returnHeadingToleranceDeg);
         modeCfg.fallbackMarkerSec = iniFile.getOr("COURSE", "fallback marker sec", modeCfg.fallbackMarkerSec);
         modeCfg.minHomeDetectSec = iniFile.getOr("COURSE", "min home detect sec", modeCfg.minHomeDetectSec);
         modeCfg.minReturnTravelSec = iniFile.getOr("COURSE", "min return travel sec", modeCfg.minReturnTravelSec);
@@ -1834,6 +1916,7 @@ namespace {
 
         bool shouldQuit = false;
         bool timedOut = false;
+        std::optional<float> lastHeadingDeg;
 
         while (!shouldQuit && course.running()) {
             const auto now = std::chrono::steady_clock::now();
@@ -1853,13 +1936,14 @@ namespace {
             d.frontLeftMm = snap.sectors.frontLeftMm;
             d.rearMm = snap.sectors.rearMm;
 
-            course.update(d, board);
-
             while (auto status = board.readStatusOnce(1)) {
+                updateHeadingFromStatus_(*status, lastHeadingDeg);
                 if (!status->rawLine.empty()) {
                     std::cout << "[MB] " << status->rawLine << std::endl;
                 }
             }
+
+            course.update(d, board, lastHeadingDeg);
 
             if (now >= tNextLog) {
                 std::cout << "[COURSE] t=" << std::fixed << std::setprecision(1) << elapsedSec
@@ -1871,7 +1955,8 @@ namespace {
                     << "mm | right=" << (std::isfinite(d.rightMm) ? d.rightMm : 0.0f)
                     << "mm | left=" << (std::isfinite(d.leftMm) ? d.leftMm : 0.0f)
                     << "mm | rear=" << (std::isfinite(d.rearMm) ? d.rearMm : 0.0f)
-                    << "mm" << std::endl;
+                    << "mm | heading=" << (lastHeadingDeg ? *lastHeadingDeg : 0.0f)
+                    << (lastHeadingDeg ? "deg" : "deg[n/a]") << std::endl;
                 tNextLog = now + std::chrono::milliseconds(runtimeCfg.logPeriodMs);
             }
 
@@ -2103,6 +2188,7 @@ int main()
 
     iniFile.get("CAMERA", "nombres de prise pour la calibration", valA);
     cam.setNeededViews(valA);
+    cam.setCalibrationMode(mode == CATJ_utility::programme_mode::calibration);
 
     iniFile.get("CAMERA", "video codec", imgCodec);
     iniFile.get("CAMERA", "video ext", imgExt);
@@ -2174,15 +2260,19 @@ int main()
             cam.startRecording(recordingPath, cam.getFps(), imgCodec);
         }
 
-        cam.setThresholds(0.35f, 0.45f);
-        cam.setAIFps(5);
-        cam.setColorDecision(CATJ_camera::BallColor::Red, CATJ_camera::BallColor::Blue);
-
+        std::cout << "Mode CAMERA: detection active. Touche q pour quitter si l'affichage OpenCV est actif." << std::endl;
+        auto lastCameraLog = std::chrono::steady_clock::now();
         while (cam.isOpen()) {
-			std::cout << "debug" << std::endl;
             if (cam.detectBalls(dets)) {
-                std::cout << "Balle détectée !\n" << std::endl;
+                const auto now = std::chrono::steady_clock::now();
+                if ((now - lastCameraLog) >= std::chrono::milliseconds(500)) {
+                    std::cout << "Balles detectees: " << dets.size() << std::endl;
+                    lastCameraLog = now;
+                }
             }
+            const int key = cv::pollKey();
+            if (key == 'q' || key == 'Q') break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         break;
 

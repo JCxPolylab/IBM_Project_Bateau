@@ -61,7 +61,7 @@ void drawLabelBox(cv::Mat& frame,
                 scale,
                 fg,
                 thickness,
-                cv::LINE_AA);
+                cv::LINE_8);
 }
 
 std::string fmm(float v)
@@ -716,7 +716,7 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
         if (box.width <= 1 || box.height <= 1) continue;
 
         const cv::Scalar color = det.primary ? cv::Scalar(0, 255, 255) : det.color;
-        cv::rectangle(out, box, color, det.primary ? boxThicknessPrimary : boxThickness, cv::LINE_AA);
+        cv::rectangle(out, box, color, det.primary ? boxThicknessPrimary : boxThickness, cv::LINE_8);
 
         std::ostringstream label;
         label << det.label << ' ' << std::fixed << std::setprecision(0)
@@ -735,14 +735,14 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
                    smallFrame ? 3 : 4,
                    color,
                    cv::FILLED,
-                   cv::LINE_AA);
+                   cv::LINE_8);
 
         if (det.primary) {
             const int cx = box.x + box.width / 2;
             const int cy = box.y + box.height / 2;
             const int half = smallFrame ? 8 : 12;
-            cv::line(out, {cx - half, cy}, {cx + half, cy}, color, 1, cv::LINE_AA);
-            cv::line(out, {cx, cy - half}, {cx, cy + half}, color, 1, cv::LINE_AA);
+            cv::line(out, {cx - half, cy}, {cx + half, cy}, color, 1, cv::LINE_8);
+            cv::line(out, {cx, cy - half}, {cx, cy + half}, color, 1, cv::LINE_8);
         }
     }
 
@@ -824,7 +824,7 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
                 textScale1,
                 cv::Scalar(255, 255, 255),
                 textThickness,
-                cv::LINE_AA);
+                cv::LINE_8);
 
     cv::putText(out,
                 line2.str(),
@@ -833,7 +833,7 @@ cv::Mat RobotWebBridge::buildOverlayFrame_(const cv::Mat& frameBgr) const
                 textScale2,
                 cv::Scalar(210, 220, 235),
                 textThickness,
-                cv::LINE_AA);
+                cv::LINE_8);
 
     return out;
 }
