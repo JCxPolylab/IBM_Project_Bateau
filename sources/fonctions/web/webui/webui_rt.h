@@ -76,6 +76,8 @@ public:
     bool isRunning() const { return running_.load(); }
 
     const WebUiRtConfig& config() const { return cfg_; }
+    void setJpegQuality(int quality);
+    int jpegQuality() const;
     std::string baseUrl(const std::string& hostOrIp = "") const;
 
     void setTelemetryProvider(TelemetryProvider cb);
@@ -146,6 +148,7 @@ private:
     std::vector<uint8_t> lastJpegFrame_;
     int lastFrameWidth_ = 0;
     int lastFrameHeight_ = 0;
+    std::atomic<int> jpegQualityRuntime_{80};
 
     void acceptLoop_();
     void telemetryLoop_();

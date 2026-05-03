@@ -10,10 +10,12 @@
 #include "../fonctions/mode/labyrinthe/mode_labyrinthe.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <unordered_map>
@@ -139,11 +141,11 @@ namespace {
     {
         std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
-        });
+            });
 
         s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) {
             return std::isspace(c) != 0 || c == '_' || c == '-';
-        }), s.end());
+            }), s.end());
 
         if (s == "red" || s == "rouge") return CATJ_camera::BallColor::Red;
         if (s == "blue" || s == "bleu") return CATJ_camera::BallColor::Blue;
@@ -168,6 +170,28 @@ namespace {
         return CATJ_camera::BallColor::Unknown;
     }
 
+    static bool parseHtmlHexRgb_(std::string raw, uint32_t& rgb)
+    {
+        raw = CATJ_utility::trim_copy(raw);
+        if (raw.empty()) return false;
+        if (raw[0] == '#') raw.erase(raw.begin());
+        if (raw.size() == 3) {
+            std::string expanded;
+            expanded.reserve(6);
+            for (char c : raw) { expanded.push_back(c); expanded.push_back(c); }
+            raw = expanded;
+        }
+        if (raw.size() != 6) return false;
+        for (char c : raw) {
+            if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+        }
+        try {
+            rgb = static_cast<uint32_t>(std::stoul(raw, nullptr, 16));
+            return true;
+        }
+        catch (...) { return false; }
+    }
+
     CATJ_camera::BallColor parseConfiguredBallColor_(const std::string& raw,
         CATJ_camera::BallColor fallback)
     {
@@ -175,7 +199,7 @@ namespace {
         if (byName != CATJ_camera::BallColor::Unknown) return byName;
 
         uint32_t rgb = 0;
-        if (CATJ_utility::parseHexU32(CATJ_utility::trim_copy(raw), rgb)) {
+        if (parseHtmlHexRgb_(raw, rgb) || CATJ_utility::parseHexU32(CATJ_utility::trim_copy(raw), rgb)) {
             const auto byHex = ballColorFromHexRgb_(rgb);
             if (byHex != CATJ_camera::BallColor::Unknown) return byHex;
         }
@@ -296,7 +320,8 @@ namespace {
             int base = 10;
             if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0) { s = s.substr(2); base = 16; }
             return static_cast<uint32_t>(std::stoul(s, nullptr, base));
-        } catch (...) { return fallback; }
+        }
+        catch (...) { return fallback; }
     }
 
     static std::string hex8_(uint32_t v)
@@ -311,6 +336,259 @@ namespace {
         std::ostringstream oss;
         oss << "0x" << std::uppercase << std::hex << std::setw(4) << std::setfill('0') << (v & 0xFFFFu);
         return oss.str();
+    }
+
+
+    struct EditableIniValue_ {
+        std::string section;
+        std::string key;
+        std::string value;
+    };
+
+    static std::string jsonPair_(const std::string& key, const std::string& value)
+    {
+        return "\"" + CATJ_webui_rt::WebUiRtServer::jsonEscape(key) + "\":\"" +
+            CATJ_webui_rt::WebUiRtServer::jsonEscape(value) + "\"";
+    }
+
+    static std::string iniReadRawValue_(const std::filesystem::path& iniPath,
+        const std::string& section,
+        const std::string& key,
+        const std::string& fallback = "")
+    {
+        std::ifstream f(iniPath);
+        if (!f.is_open()) return fallback;
+
+        std::string line;
+        std::string current;
+        while (std::getline(f, line)) {
+            std::string t = CATJ_utility::trim_copy(line);
+            if (t.empty() || t[0] == ';' || t[0] == '#') continue;
+            if (t.front() == '[' && t.back() == ']') {
+                current = CATJ_utility::trim_copy(t.substr(1, t.size() - 2));
+                continue;
+            }
+            if (current != section) continue;
+            const auto eq = t.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = CATJ_utility::trim_copy(t.substr(0, eq));
+            if (k != key) continue;
+            std::string v = CATJ_utility::trim_copy(t.substr(eq + 1));
+            const auto sc = v.find(';');
+            const auto hs = v.find('#');
+            const size_t cut = std::min(sc == std::string::npos ? v.size() : sc,
+                                        hs == std::string::npos ? v.size() : hs);
+            return CATJ_utility::trim_copy(v.substr(0, cut));
+        }
+        return fallback;
+    }
+
+    static bool iniWriteValuesPreserve_(const std::filesystem::path& iniPath,
+        const std::vector<EditableIniValue_>& updates,
+        std::string* error)
+    {
+        std::ifstream in(iniPath);
+        if (!in.is_open()) {
+            if (error) *error = "Impossible d'ouvrir " + iniPath.string();
+            return false;
+        }
+
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(in, line)) lines.push_back(line);
+        in.close();
+
+        auto stripComment = [](std::string v) {
+            const auto sc = v.find(';');
+            const auto hs = v.find('#');
+            const size_t cut = std::min(sc == std::string::npos ? v.size() : sc,
+                                        hs == std::string::npos ? v.size() : hs);
+            return CATJ_utility::trim_copy(v.substr(0, cut));
+        };
+
+        for (const auto& u : updates) {
+            if (u.section.empty() || u.key.empty()) continue;
+
+            bool inSection = false;
+            bool sectionFound = false;
+            bool keyWritten = false;
+            size_t insertBefore = lines.size();
+
+            for (size_t i = 0; i < lines.size(); ++i) {
+                std::string t = CATJ_utility::trim_copy(lines[i]);
+                if (!t.empty() && t.front() == '[' && t.back() == ']') {
+                    std::string sec = CATJ_utility::trim_copy(t.substr(1, t.size() - 2));
+                    if (sec == u.section) {
+                        inSection = true;
+                        sectionFound = true;
+                        insertBefore = i + 1;
+                    }
+                    else if (inSection) {
+                        insertBefore = i;
+                        break;
+                    }
+                    else {
+                        inSection = false;
+                    }
+                    continue;
+                }
+
+                if (!inSection) continue;
+                if (t.empty() || t[0] == ';' || t[0] == '#') {
+                    insertBefore = i + 1;
+                    continue;
+                }
+
+                const auto eq = t.find('=');
+                if (eq == std::string::npos) {
+                    insertBefore = i + 1;
+                    continue;
+                }
+
+                std::string k = CATJ_utility::trim_copy(t.substr(0, eq));
+                if (k == u.key) {
+                    // On conserve uniquement la clé et on remplace la valeur.
+                    lines[i] = u.key + " = " + u.value;
+                    keyWritten = true;
+                    break;
+                }
+                insertBefore = i + 1;
+            }
+
+            if (!keyWritten) {
+                if (!sectionFound) {
+                    if (!lines.empty() && !CATJ_utility::trim_copy(lines.back()).empty()) lines.push_back("");
+                    lines.push_back("[" + u.section + "]");
+                    lines.push_back(u.key + " = " + u.value);
+                }
+                else {
+                    if (insertBefore > lines.size()) insertBefore = lines.size();
+                    lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(insertBefore), u.key + " = " + u.value);
+                }
+            }
+        }
+
+        const auto backupPath = iniPath.string() + ".bak";
+        try {
+            std::filesystem::copy_file(iniPath, backupPath, std::filesystem::copy_options::overwrite_existing);
+        }
+        catch (...) {
+            // Backup best effort. Ne bloque pas la sauvegarde principale.
+        }
+
+        std::ofstream out(iniPath, std::ios::trunc);
+        if (!out.is_open()) {
+            if (error) *error = "Impossible d'écrire " + iniPath.string();
+            return false;
+        }
+        for (const auto& l : lines) out << l << '\n';
+        return true;
+    }
+
+    static bool copyFileOverwrite_(const std::filesystem::path& from,
+        const std::filesystem::path& to,
+        std::string* error)
+    {
+        try {
+            if (!std::filesystem::exists(from)) {
+                if (error) *error = "Fichier introuvable : " + from.string();
+                return false;
+            }
+            std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing);
+            return true;
+        }
+        catch (const std::exception& e) {
+            if (error) *error = e.what();
+            return false;
+        }
+    }
+
+    static bool boolFromString_(const std::string& raw, bool fallback)
+    {
+        std::string v = CATJ_utility::toLower_copy(CATJ_utility::trim_copy(raw));
+        if (v == "1" || v == "true" || v == "yes" || v == "on") return true;
+        if (v == "0" || v == "false" || v == "no" || v == "off") return false;
+        return fallback;
+    }
+
+    static int intFromString_(const std::string& raw, int fallback)
+    {
+        try { return std::stoi(CATJ_utility::trim_copy(raw)); }
+        catch (...) { return fallback; }
+    }
+
+    static float floatFromString_(const std::string& raw, float fallback)
+    {
+        try { return std::stof(CATJ_utility::trim_copy(raw)); }
+        catch (...) { return fallback; }
+    }
+
+    static std::string editableVisionConfigJson_(const std::filesystem::path& configPath,
+        const std::filesystem::path& resetPath,
+        int liveWebVideoFps,
+        int liveWebLoopSleepMs,
+        int liveJpegQuality)
+    {
+        struct Field { const char* section; const char* key; const char* type; const char* label; const char* minv; const char* maxv; const char* step; bool live; bool restart; };
+        const Field fields[] = {
+            {"CAMERA", "device", "number", "Device /dev/videoN", "0", "10", "1", false, true},
+            {"CAMERA", "backend", "select", "Backend caméra", "", "", "", false, true},
+            {"CAMERA", "width", "number", "Largeur capture", "160", "1920", "1", false, true},
+            {"CAMERA", "height", "number", "Hauteur capture", "120", "1080", "1", false, true},
+            {"CAMERA", "fps", "number", "FPS caméra", "1", "60", "1", false, true},
+            {"CAMERA", "Aifps", "number", "FPS IA", "1", "30", "1", true, false},
+            {"CAMERA", "onnx input size", "number", "Taille entrée ONNX", "160", "960", "32", false, true},
+            {"CAMERA", "score threshold", "number", "Score threshold", "0", "1", "0.01", true, false},
+            {"CAMERA", "non maximum suppression threshold", "number", "NMS threshold", "0", "1", "0.01", true, false},
+            {"CAMERA", "target color", "select", "Couleur cible", "", "", "", true, false},
+            {"CAMERA", "ignore color", "select", "Couleur ignorée", "", "", "", true, false},
+            {"CAMERA", "show image", "bool", "Affichage OpenCV local", "", "", "", true, false},
+            {"CAMERA", "flag recording", "bool", "Enregistrement vidéo", "", "", "", false, true},
+            {"CAMERA", "undistort enabled", "bool", "Correction distorsion live", "", "", "", true, false},
+            {"CAMERA", "hardware focal mm", "number", "Focale hardware mm", "0", "20", "0.01", true, false},
+            {"CAMERA", "calibration file", "text", "Fichier calibration", "", "", "", false, false},
+            {"CAMERA", "echiquier size", "text", "Échiquier colonnes,lignes", "", "", "", false, false},
+            {"CAMERA", "square size", "number", "Taille carré échiquier", "0", "100", "0.01", true, false},
+            {"CAMERA", "nombres de prise pour la calibration", "number", "Nombre vues calibration", "1", "80", "1", true, false},
+            {"IA", "ONNX model path", "text", "Modèle ONNX", "", "", "", false, true},
+            {"WEB", "vision enabled", "bool", "Vision IA web", "", "", "", true, false},
+            {"WEB", "async ai enabled", "bool", "IA asynchrone", "", "", "", false, true},
+            {"WEB", "stream camera", "bool", "Flux caméra web", "", "", "", false, true},
+            {"WEB", "video fps", "number", "FPS vidéo web", "1", "30", "1", true, false},
+            {"WEB", "jpeg quality", "number", "Qualité JPEG web", "20", "100", "1", true, false},
+            {"WEB", "loop sleep ms", "number", "Sleep boucle web", "1", "100", "1", true, false}
+        };
+
+        auto esc = CATJ_webui_rt::WebUiRtServer::jsonEscape;
+        std::ostringstream js;
+        js << "{\"ok\":true,";
+        js << "\"config_path\":\"" << esc(configPath.string()) << "\",";
+        js << "\"reset_path\":\"" << esc(resetPath.string()) << "\",";
+        js << "\"reset_exists\":" << (std::filesystem::exists(resetPath) ? "true" : "false") << ',';
+        js << "\"runtime\":{\"web_video_fps\":" << liveWebVideoFps
+           << ",\"web_loop_sleep_ms\":" << liveWebLoopSleepMs
+           << ",\"jpeg_quality\":" << liveJpegQuality << "},";
+        js << "\"fields\":[";
+        bool first = true;
+        for (const auto& f : fields) {
+            if (!first) js << ',';
+            first = false;
+            std::string val = iniReadRawValue_(configPath, f.section, f.key, "");
+            js << '{';
+            js << "\"section\":\"" << esc(f.section) << "\",";
+            js << "\"key\":\"" << esc(f.key) << "\",";
+            js << "\"type\":\"" << esc(f.type) << "\",";
+            js << "\"label\":\"" << esc(f.label) << "\",";
+            js << "\"value\":\"" << esc(val) << "\",";
+            js << "\"min\":\"" << esc(f.minv) << "\",";
+            js << "\"max\":\"" << esc(f.maxv) << "\",";
+            js << "\"step\":\"" << esc(f.step) << "\",";
+            js << "\"live\":" << (f.live ? "true" : "false") << ',';
+            js << "\"restart_required\":" << (f.restart ? "true" : "false");
+            js << '}';
+        }
+        js << "]}";
+        return js.str();
     }
 
 
@@ -329,7 +607,8 @@ namespace {
             int base = 10;
             if (a.rfind("0x", 0) == 0 || a.rfind("0X", 0) == 0) { a = a.substr(2); base = 16; }
             outAddr = static_cast<uint16_t>(std::stoul(a, nullptr, base));
-        } catch (...) { return false; }
+        }
+        catch (...) { return false; }
         return !outDev.empty();
     }
 
@@ -357,9 +636,12 @@ namespace {
                 bitsPart = rest.substr(plus + 1);
             }
         }
-        try { if (!speedPart.empty()) outSpeed = static_cast<uint32_t>(std::stoul(speedPart)); } catch (...) {}
-        try { if (!modePart.empty()) outMode = static_cast<uint8_t>(std::stoi(modePart)); } catch (...) {}
-        try { if (!bitsPart.empty()) outBits = static_cast<uint8_t>(std::stoi(bitsPart)); } catch (...) {}
+        try { if (!speedPart.empty()) outSpeed = static_cast<uint32_t>(std::stoul(speedPart)); }
+        catch (...) {}
+        try { if (!modePart.empty()) outMode = static_cast<uint8_t>(std::stoi(modePart)); }
+        catch (...) {}
+        try { if (!bitsPart.empty()) outBits = static_cast<uint8_t>(std::stoi(bitsPart)); }
+        catch (...) {}
         outMode = std::min<uint8_t>(outMode, 3);
         if (outBits == 0) outBits = 8;
         return !outDev.empty();
@@ -400,19 +682,32 @@ namespace {
 
     CATJ_utility::fs::path resolveProjectPath(CATJ_utility::fs::path exeDir)
     {
-#ifdef WIN32
-        const char* expectedName = DIR_NAME;
-#else
-        const char* expectedName = DIR_NAME_LINUX;
-#endif
-        while (!exeDir.empty() && exeDir.filename() != expectedName)
+        namespace fs = CATJ_utility::fs;
+
+        fs::path p = fs::absolute(exeDir).lexically_normal();
+
+        while (!p.empty())
         {
-            std::cout << "dossier path check : " << exeDir.filename() << std::endl;
-            exeDir = exeDir.parent_path();
-            if (exeDir.filename().compare("") == 0)
+            std::cout << "dossier path check : " << p.filename() << std::endl;
+
+            const fs::path configPath = p / "parametres" / "config.ini";
+
+            if (fs::exists(configPath))
+            {
+                std::cout << "Projet détecté : " << p << std::endl;
+                std::cout << "Config détectée : " << configPath << std::endl;
+                return p;
+            }
+
+            fs::path parent = p.parent_path();
+
+            if (parent == p)
                 break;
+
+            p = parent;
         }
-        return exeDir;
+
+        return {};
     }
 
     int runRemoteWebMode(const std::filesystem::path& prjPath,
@@ -438,6 +733,7 @@ namespace {
         // vision enabled : active / désactive la détection + overlay.
         const bool streamCamera = iniFile.getOr("WEB", "stream camera", true);
         const bool visionEnabled = iniFile.getOr("WEB", "vision enabled", (baseMode == CATJ_utility::programme_mode::camera));
+        const bool asyncAiEnabled = iniFile.getOr("WEB", "async ai enabled", true);
 
         // --- LIDAR ---
         const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
@@ -445,6 +741,7 @@ namespace {
         const int lidarBaud = iniFile.getOr("LIDAR", "baudrate", 460800);
         const bool lidarMock = iniFile.getOr("LIDAR", "mock", false);
         const int lidarWebMaxPoints = iniFile.getOr("LIDAR", "web max points", 180);
+        const int lidarWebPeriodMs = std::clamp(iniFile.getOr("LIDAR", "web period ms", 100), 20, 1000);
         const float lidarMaxDistMm = iniFile.getOr("LIDAR", "max distance mm", 8000.0f);
         const float lidarFrontHalfDeg = iniFile.getOr("LIDAR", "front half angle deg", 20.0f);
         const float lidarLateralHalfDeg = iniFile.getOr("LIDAR", "lateral half angle deg", 50.0f);
@@ -467,6 +764,14 @@ namespace {
 
         std::cout << "Dashboard disponible sur : http://" << "raspberrypi:" << webCfg.port << std::endl;
 
+        const auto configIniPath = prjPath / "parametres" / "config.ini";
+        const auto resetIniPath = prjPath / "parametres" / "config.reset.ini";
+        std::atomic<int> liveWebVideoFps{ webVideoFps };
+        std::atomic<int> liveWebLoopSleepMs{ webLoopSleepMs };
+        std::atomic<bool> liveVisionEnabled{ visionEnabled };
+        std::atomic<int> liveJpegQuality{ jpegQuality };
+        bridge.server().setJpegQuality(jpegQuality);
+
         // --- COMMS (UART / Bluetooth / WiFi / RJ45) ---
         CATJ_comms::CommsManager comms;
         {
@@ -474,7 +779,8 @@ namespace {
             const auto commsIni = prjPath / "parametres" / "motherboard_trame.ini";
             if (!comms.loadIni(commsIni, &commsErr)) {
                 std::cerr << "[COMMS] " << commsErr << std::endl;
-            } else {
+            }
+            else {
                 std::cout << "[COMMS] Presets chargés: " << commsIni << std::endl;
             }
         }
@@ -486,12 +792,13 @@ namespace {
             r.contentType = "application/json; charset=utf-8";
             r.body = comms.configJson();
             return r;
-        });
+            });
 
         bridge.server().registerGet("/api/comms_history", [&](const CATJ_webui_rt::HttpRequest& req) {
             size_t limit = 200;
             if (auto it = req.query.find("limit"); it != req.query.end()) {
-                try { limit = static_cast<size_t>(std::stoul(it->second)); } catch (...) {}
+                try { limit = static_cast<size_t>(std::stoul(it->second)); }
+                catch (...) {}
                 limit = std::clamp<size_t>(limit, 10, 2000);
             }
             CATJ_webui_rt::HttpResponse r;
@@ -499,7 +806,7 @@ namespace {
             r.contentType = "application/json; charset=utf-8";
             r.body = comms.historyJson(limit);
             return r;
-        });
+            });
 
         bridge.server().registerGet("/api/system_profile", [&](const CATJ_webui_rt::HttpRequest&) {
             const auto esc = CATJ_webui_rt::WebUiRtServer::jsonEscape;
@@ -509,14 +816,14 @@ namespace {
             const int camWidth = iniFile.getOr("CAMERA", "width", 0);
             const int camHeight = iniFile.getOr("CAMERA", "height", 0);
             const int camFps = iniFile.getOr("CAMERA", "fps", 0);
-            const int camAiFps = iniFile.getOr("CAMERA", "Aifps", 0);
+            const int camAiFps = cam.getAiFps();
             const std::string camBackend = iniFile.getOr<std::string>("CAMERA", "backend", "auto");
             const bool camShowImage = iniFile.getOr("CAMERA", "show image", false);
             const bool camRecording = iniFile.getOr("CAMERA", "flag recording", false);
             const std::string camRecordingPathIni = iniFile.getOr<std::string>("CAMERA", "recording file path", "");
 
-            const float scoreThreshold = iniFile.getOr("CAMERA", "score threshold", 0.45f);
-            const float nmsThreshold = iniFile.getOr("CAMERA", "non maximum suppression threshold", 0.35f);
+            const float scoreThreshold = cam.getConfThreshold();
+            const float nmsThreshold = cam.getNmsThreshold();
 
             std::string onnxModel = iniFile.getOr<std::string>("IA", "ONNX model path", "");
             if (!onnxModel.empty()) {
@@ -532,13 +839,13 @@ namespace {
             js << "\"ok\":true,";
             js << "\"base_mode\":\"" << esc(CATJ_utility::modeToStr(baseMode)) << "\",";
             js << "\"stream_camera\":" << (streamCamera ? "true" : "false") << ',';
-            js << "\"vision_enabled\":" << (visionEnabled ? "true" : "false") << ',';
+            js << "\"vision_enabled\":" << (liveVisionEnabled.load() ? "true" : "false") << ',';
             js << "\"overlay_default\":true,";
             js << "\"allow_network_control\":" << (allowNetworkControl ? "true" : "false") << ',';
             js << "\"telemetry_period_ms\":" << telemetryPeriodMs << ',';
-            js << "\"jpeg_quality\":" << jpegQuality << ',';
-            js << "\"video_fps\":" << webVideoFps << ',';
-            js << "\"loop_sleep_ms\":" << webLoopSleepMs << ',';
+            js << "\"jpeg_quality\":" << liveJpegQuality.load() << ',';
+            js << "\"video_fps\":" << liveWebVideoFps.load() << ',';
+            js << "\"loop_sleep_ms\":" << liveWebLoopSleepMs.load() << ',';
             js << "\"image_codec\":\"" << esc(codec) << "\",";
 
             js << "\"camera\":{";
@@ -577,7 +884,179 @@ namespace {
             r.contentType = "application/json; charset=utf-8";
             r.body = js.str();
             return r;
-        });
+            });
+
+
+        auto isEditableVisionField = [](const std::string& section, const std::string& key) -> bool {
+            static const std::vector<std::pair<std::string, std::string>> allowed = {
+                {"CAMERA", "device"}, {"CAMERA", "backend"}, {"CAMERA", "width"}, {"CAMERA", "height"},
+                {"CAMERA", "fps"}, {"CAMERA", "Aifps"}, {"CAMERA", "onnx input size"},
+                {"CAMERA", "score threshold"}, {"CAMERA", "non maximum suppression threshold"},
+                {"CAMERA", "target color"}, {"CAMERA", "ignore color"}, {"CAMERA", "show image"},
+                {"CAMERA", "flag recording"}, {"CAMERA", "undistort enabled"}, {"CAMERA", "hardware focal mm"},
+                {"CAMERA", "calibration file"}, {"CAMERA", "echiquier size"}, {"CAMERA", "square size"},
+                {"CAMERA", "nombres de prise pour la calibration"},
+                {"IA", "ONNX model path"},
+                {"WEB", "vision enabled"}, {"WEB", "async ai enabled"}, {"WEB", "stream camera"}, {"WEB", "video fps"},
+                {"WEB", "jpeg quality"}, {"WEB", "loop sleep ms"}
+            };
+            return std::find(allowed.begin(), allowed.end(), std::make_pair(section, key)) != allowed.end();
+        };
+
+        auto updatesFromRequest = [&](const CATJ_webui_rt::HttpRequest& req) {
+            std::vector<EditableIniValue_> updates;
+            const auto f = parseUrlEncoded_(req.body);
+            for (const auto& kv : f) {
+                if (kv.first == "reload_model") continue;
+                const auto dot = kv.first.find('.');
+                if (dot == std::string::npos) continue;
+                std::string section = kv.first.substr(0, dot);
+                std::string key = kv.first.substr(dot + 1);
+                if (!isEditableVisionField(section, key)) continue;
+                updates.push_back({ section, key, kv.second });
+            }
+            return updates;
+        };
+
+        auto allEditableUpdatesFromFile = [&]() {
+            std::vector<EditableIniValue_> updates;
+            const std::vector<std::pair<std::string, std::string>> keys = {
+                {"CAMERA", "Aifps"}, {"CAMERA", "score threshold"}, {"CAMERA", "non maximum suppression threshold"},
+                {"CAMERA", "target color"}, {"CAMERA", "ignore color"}, {"CAMERA", "show image"},
+                {"CAMERA", "flag recording"}, {"CAMERA", "undistort enabled"}, {"CAMERA", "hardware focal mm"},
+                {"CAMERA", "square size"}, {"CAMERA", "nombres de prise pour la calibration"},
+                {"WEB", "vision enabled"}, {"WEB", "video fps"}, {"WEB", "jpeg quality"}, {"WEB", "loop sleep ms"}
+            };
+            for (const auto& k : keys) {
+                updates.push_back({ k.first, k.second, iniReadRawValue_(configIniPath, k.first, k.second, "") });
+            }
+            return updates;
+        };
+
+        auto applyVisionRuntimeUpdates = [&](const std::vector<EditableIniValue_>& updates) {
+            for (const auto& u : updates) {
+                if (u.section == "CAMERA" && u.key == "Aifps") {
+                    cam.setAiFps(std::clamp(intFromString_(u.value, cam.getAiFps()), 1, 30));
+                }
+                else if (u.section == "CAMERA" && (u.key == "score threshold" || u.key == "non maximum suppression threshold")) {
+                    const float score = floatFromString_(iniReadRawValue_(configIniPath, "CAMERA", "score threshold", "0.35"), 0.35f);
+                    const float nms = floatFromString_(iniReadRawValue_(configIniPath, "CAMERA", "non maximum suppression threshold", "0.45"), 0.45f);
+                    float newScore = score;
+                    float newNms = nms;
+                    for (const auto& v : updates) {
+                        if (v.section == "CAMERA" && v.key == "score threshold") newScore = floatFromString_(v.value, score);
+                        if (v.section == "CAMERA" && v.key == "non maximum suppression threshold") newNms = floatFromString_(v.value, nms);
+                    }
+                    cam.setThresholds(std::clamp(newScore, 0.0f, 1.0f), std::clamp(newNms, 0.0f, 1.0f));
+                }
+                else if (u.section == "CAMERA" && u.key == "target color") {
+                    auto c = parseConfiguredBallColor_(u.value, cam.getTargetColor());
+                    cam.setTargetColor(c);
+                }
+                else if (u.section == "CAMERA" && u.key == "ignore color") {
+                    auto c = parseConfiguredBallColor_(u.value, cam.getIgnoreColor());
+                    cam.setIgnoreColor(c);
+                }
+                else if (u.section == "CAMERA" && u.key == "show image") {
+                    cam.setShow(boolFromString_(u.value, showImage));
+                }
+                else if (u.section == "CAMERA" && u.key == "flag recording") {
+                    cam.setRecording(boolFromString_(u.value, cam.getRecording()));
+                }
+                else if (u.section == "CAMERA" && u.key == "undistort enabled") {
+                    cam.setUndistortEnabled(boolFromString_(u.value, cam.undistortEnabled()));
+                }
+                else if (u.section == "CAMERA" && u.key == "hardware focal mm") {
+                    cam.setHWFocaleMm(floatFromString_(u.value, static_cast<float>(cam.getHWFocaleMm())));
+                }
+                else if (u.section == "CAMERA" && u.key == "square size") {
+                    cam.setSquareSizeCalibration(floatFromString_(u.value, cam.getSquareSizeCalibration()));
+                }
+                else if (u.section == "CAMERA" && u.key == "nombres de prise pour la calibration") {
+                    cam.setNeededViews(std::clamp(intFromString_(u.value, cam.getNeededViews()), 1, 80));
+                }
+                else if (u.section == "WEB" && u.key == "vision enabled") {
+                    liveVisionEnabled.store(boolFromString_(u.value, liveVisionEnabled.load()));
+                }
+                else if (u.section == "WEB" && u.key == "video fps") {
+                    liveWebVideoFps.store(std::clamp(intFromString_(u.value, liveWebVideoFps.load()), 1, 30));
+                }
+                else if (u.section == "WEB" && u.key == "jpeg quality") {
+                    const int q = std::clamp(intFromString_(u.value, liveJpegQuality.load()), 20, 100);
+                    liveJpegQuality.store(q);
+                    bridge.server().setJpegQuality(q);
+                }
+                else if (u.section == "WEB" && u.key == "loop sleep ms") {
+                    liveWebLoopSleepMs.store(std::clamp(intFromString_(u.value, liveWebLoopSleepMs.load()), 1, 100));
+                }
+            }
+        };
+
+        bridge.server().registerGet("/api/vision_config", [&](const CATJ_webui_rt::HttpRequest&) {
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = editableVisionConfigJson_(configIniPath, resetIniPath,
+                liveWebVideoFps.load(), liveWebLoopSleepMs.load(), liveJpegQuality.load());
+            return r;
+            });
+
+        bridge.server().registerPost("/api/vision_config_apply", [&](const CATJ_webui_rt::HttpRequest& req) {
+            auto updates = updatesFromRequest(req);
+            applyVisionRuntimeUpdates(updates);
+            CATJ_webui_rt::HttpResponse r;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = "{\"ok\":true,\"message\":\"Parametres appliques en live. Les champs marques restart seront pris en compte au prochain redemarrage.\"}";
+            return r;
+            });
+
+        bridge.server().registerPost("/api/vision_config_save", [&](const CATJ_webui_rt::HttpRequest& req) {
+            auto updates = updatesFromRequest(req);
+            std::string err;
+            CATJ_webui_rt::HttpResponse r;
+            r.contentType = "application/json; charset=utf-8";
+            if (!iniWriteValuesPreserve_(configIniPath, updates, &err)) {
+                r.status = 400;
+                r.body = std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}";
+                return r;
+            }
+            iniFile.load(configIniPath.string());
+            applyVisionRuntimeUpdates(updates);
+            r.body = "{\"ok\":true,\"message\":\"config.ini sauvegarde. Backup cree en config.ini.bak.\"}";
+            bridge.server().broadcastJsonEnvelope("vision_config", editableVisionConfigJson_(configIniPath, resetIniPath,
+                liveWebVideoFps.load(), liveWebLoopSleepMs.load(), liveJpegQuality.load()));
+            return r;
+            });
+
+        bridge.server().registerPost("/api/vision_config_make_reset", [&](const CATJ_webui_rt::HttpRequest&) {
+            std::string err;
+            CATJ_webui_rt::HttpResponse r;
+            r.contentType = "application/json; charset=utf-8";
+            if (!copyFileOverwrite_(configIniPath, resetIniPath, &err)) {
+                r.status = 400;
+                r.body = std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}";
+                return r;
+            }
+            r.body = "{\"ok\":true,\"message\":\"Fichier reset cree depuis le config.ini courant.\"}";
+            return r;
+            });
+
+        bridge.server().registerPost("/api/vision_config_reset", [&](const CATJ_webui_rt::HttpRequest&) {
+            std::string err;
+            CATJ_webui_rt::HttpResponse r;
+            r.contentType = "application/json; charset=utf-8";
+            if (!copyFileOverwrite_(resetIniPath, configIniPath, &err)) {
+                r.status = 400;
+                r.body = std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(err) + "\"}";
+                return r;
+            }
+            iniFile.load(configIniPath.string());
+            applyVisionRuntimeUpdates(allEditableUpdatesFromFile());
+            r.body = "{\"ok\":true,\"message\":\"config.ini restaure depuis config.reset.ini.\"}";
+            bridge.server().broadcastJsonEnvelope("vision_config", editableVisionConfigJson_(configIniPath, resetIniPath,
+                liveWebVideoFps.load(), liveWebLoopSleepMs.load(), liveJpegQuality.load()));
+            return r;
+            });
 
         auto doScan = [&]() {
             std::string scanErr;
@@ -587,10 +1066,11 @@ namespace {
             if (!scanErr.empty()) {
                 const auto msg = CATJ_webui_rt::WebUiRtServer::jsonEscape(scanErr);
                 bridge.server().broadcastText(std::string("{\"type\":\"error\",\"message\":\"") + msg + "\"}");
-            } else {
+            }
+            else {
                 bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"COMMS scan OK\"}");
             }
-        };
+            };
 
         bridge.server().registerPost("/api/comms_scan", [&](const CATJ_webui_rt::HttpRequest&) {
             doScan();
@@ -599,7 +1079,7 @@ namespace {
             r.contentType = "application/json; charset=utf-8";
             r.body = comms.configJson();
             return r;
-        });
+            });
 
         bridge.server().registerGet("/api/comms_scan", [&](const CATJ_webui_rt::HttpRequest&) {
             doScan();
@@ -608,7 +1088,7 @@ namespace {
             r.contentType = "application/json; charset=utf-8";
             r.body = comms.configJson();
             return r;
-        });
+            });
 
         // Broadcast config au démarrage (utile si la page est déjà connectée)
         bridge.server().broadcastJsonEnvelope("comms_config", comms.configJson());
@@ -625,7 +1105,7 @@ namespace {
             const std::string dev = [&]() {
                 auto it = req.query.find("device");
                 return (it == req.query.end() || it->second.empty()) ? std::string("/dev/i2c-1") : it->second;
-            }();
+                }();
             const int a0 = [&]() { auto it = req.query.find("start"); return it == req.query.end() ? 0x03 : (int)parseU32Loose_(it->second, 0x03); }();
             const int a1 = [&]() { auto it = req.query.find("end");   return it == req.query.end() ? 0x77 : (int)parseU32Loose_(it->second, 0x77); }();
 
@@ -660,7 +1140,7 @@ namespace {
 #endif
             r.body = js.str();
             return r;
-        });
+            });
 
         bridge.server().registerPost("/api/bus_i2c_reg_read", [&](const CATJ_webui_rt::HttpRequest& req) {
             const auto f = parseUrlEncoded_(req.body);
@@ -689,13 +1169,13 @@ namespace {
             }
             std::ostringstream js;
             js << "{\"ok\":true,\"device_spec\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(deviceSpec)
-               << "\",\"reg\":\"" << hex8_(reg) << "\",\"hex\":\"" << bytesToHexMain_(rx.data(), rx.size())
-               << "\",\"ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(std::string(rx.begin(), rx.end())) << "\"}";
+                << "\",\"reg\":\"" << hex8_(reg) << "\",\"hex\":\"" << bytesToHexMain_(rx.data(), rx.size())
+                << "\",\"ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(std::string(rx.begin(), rx.end())) << "\"}";
             r.body = js.str();
 #endif
             return r;
-        });
-        
+            });
+
         bridge.server().registerPost("/api/bus_i2c_reg_write", [&](const CATJ_webui_rt::HttpRequest& req) {
             const auto f = parseUrlEncoded_(req.body);
             const std::string deviceSpec = f.count("device_spec") ? f.at("device_spec") : std::string("/dev/i2c-1@0x42");
@@ -720,7 +1200,7 @@ namespace {
             r.body = ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"I2C register write failed\"}";
 #endif
             return r;
-        });
+            });
 
         bridge.server().registerPost("/api/bus_spi_reg_read", [&](const CATJ_webui_rt::HttpRequest& req) {
             const auto f = parseUrlEncoded_(req.body);
@@ -743,12 +1223,12 @@ namespace {
             if (!ok) { r.status = 400; r.body = "{\"ok\":false,\"error\":\"SPI register read failed\"}"; return r; }
             std::ostringstream js;
             js << "{\"ok\":true,\"device_spec\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(deviceSpec)
-               << "\",\"reg\":\"" << (regWidth <= 8 ? hex8_(reg) : hex16_(reg)) << "\",\"hex\":\"" << bytesToHexMain_(rx.data(), rx.size())
-               << "\",\"ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(std::string(rx.begin(), rx.end())) << "\"}";
+                << "\",\"reg\":\"" << (regWidth <= 8 ? hex8_(reg) : hex16_(reg)) << "\",\"hex\":\"" << bytesToHexMain_(rx.data(), rx.size())
+                << "\",\"ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(std::string(rx.begin(), rx.end())) << "\"}";
             r.body = js.str();
 #endif
             return r;
-        });
+            });
 
         bridge.server().registerPost("/api/bus_spi_reg_write", [&](const CATJ_webui_rt::HttpRequest& req) {
             const auto f = parseUrlEncoded_(req.body);
@@ -778,7 +1258,7 @@ namespace {
             r.body = ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"SPI register write failed\"}";
 #endif
             return r;
-        });
+            });
 
         bridge.server().registerPost("/api/bus_raw_transfer", [&](const CATJ_webui_rt::HttpRequest& req) {
             const auto f = parseUrlEncoded_(req.body);
@@ -802,14 +1282,15 @@ namespace {
             if (!rr.ok) {
                 r.status = 400;
                 r.body = std::string("{\"ok\":false,\"error\":\"") + CATJ_webui_rt::WebUiRtServer::jsonEscape(rr.error) + "\"}";
-            } else {
+            }
+            else {
                 std::ostringstream js;
                 js << "{\"ok\":true,\"reply_hex\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(rr.replyHex)
-                   << "\",\"reply_ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(rr.replyAscii) << "\"}";
+                    << "\",\"reply_ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(rr.replyAscii) << "\"}";
                 r.body = js.str();
             }
             return r;
-        });
+            });
 
         CATJ_lidar::RplidarC1 lidar;
         bool lidarOk = false;
@@ -888,15 +1369,62 @@ namespace {
 
         auto lastTs = std::chrono::steady_clock::now();
         auto nextVideoFrameTs = std::chrono::steady_clock::now();
+        auto nextAiTs = std::chrono::steady_clock::now();
+        auto nextLidarWebTs = std::chrono::steady_clock::now();
         std::vector<CATJ_robot_web::Detection> cachedWebDets;
+        std::mutex cachedWebDetsMutex;
+        CATJ_robot_web::LidarTelemetry cachedLidarWeb;
+        bool cachedLidarValid = false;
 
         std::cout << "Entrée dans la boucle principale. Appuyez sur Ctrl+C pour quitter." << std::endl;
-        std::cout << "Web perf: video_fps=" << webVideoFps
-                  << " jpeg_quality=" << jpegQuality
-                  << " loop_sleep_ms=" << webLoopSleepMs
-                  << " ai_fps=" << cam.getAiFps() << std::endl;
+        std::cout << "Web perf: video_fps=" << liveWebVideoFps.load()
+            << " jpeg_quality=" << liveJpegQuality.load()
+            << " loop_sleep_ms=" << liveWebLoopSleepMs.load()
+            << " ai_fps=" << cam.getAiFps()
+            << " async_ai=" << (asyncAiEnabled ? "ON" : "OFF") << std::endl;
 
         bool shouldQuit = false;
+        std::atomic<bool> aiWorkerRunning{ false };
+        std::thread aiWorker;
+        if (asyncAiEnabled && streamCamera && camOk) {
+            aiWorkerRunning.store(true);
+            aiWorker = std::thread([&]() {
+                auto nextRun = std::chrono::steady_clock::now();
+                while (aiWorkerRunning.load() && bridge.isRunning()) {
+                    const auto nowAi = std::chrono::steady_clock::now();
+                    if (!liveVisionEnabled.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        nextRun = std::chrono::steady_clock::now();
+                        continue;
+                    }
+                    if (nowAi < nextRun) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        continue;
+                    }
+                    const int aiPeriodMs = std::max(1, 1000 / std::max(1, cam.getAiFps()));
+
+                    cv::Mat aiFrame;
+                    if (!cam.getLatestFrame(aiFrame) || aiFrame.empty()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        continue;
+                    }
+
+                    std::vector<CATJ_camera::BallDetection> dets;
+                    cam.detectBalls(aiFrame, dets);
+                    auto web = convertDetections(dets);
+                    {
+                        std::lock_guard<std::mutex> lk(cachedWebDetsMutex);
+                        cachedWebDets = web;
+                    }
+                    bridge.updateDetections(web);
+
+                    // Cadencement volontaire après l'inférence : si l'IA est lente,
+                    // on ne lance pas une nouvelle inférence immédiatement. Cela évite
+                    // de saturer un cœur CPU en continu et garde le web/contrôle réactifs.
+                    nextRun = std::chrono::steady_clock::now() + std::chrono::milliseconds(aiPeriodMs);
+                }
+            });
+        }
 
         while (bridge.isRunning() && !shouldQuit)
         {
@@ -942,6 +1470,15 @@ namespace {
 
                 case CATJ_robot_web::ControlEventType::CameraSetting:
                     std::cout << "Réglage caméra: " << ev.name << " = " << ev.valueA << std::endl;
+                    if (ev.name == "expRange") {
+                        cam.setCaptureProperty(cv::CAP_PROP_EXPOSURE, ev.valueA);
+                    }
+                    else if (ev.name == "brightRange") {
+                        cam.setCaptureProperty(cv::CAP_PROP_BRIGHTNESS, ev.valueA);
+                    }
+                    else if (ev.name == "contrastRange") {
+                        cam.setCaptureProperty(cv::CAP_PROP_CONTRAST, ev.valueA);
+                    }
                     break;
 
                 case CATJ_robot_web::ControlEventType::ToggleOverlay:
@@ -985,12 +1522,13 @@ namespace {
                     auto getS = [&](const char* k) -> std::string {
                         auto it = ev.rawFields.find(k);
                         return (it != ev.rawFields.end()) ? it->second : std::string();
-                    };
+                        };
                     auto getI = [&](const char* k, int def) -> int {
                         auto it = ev.rawFields.find(k);
                         if (it == ev.rawFields.end()) return def;
-                        try { return std::stoi(it->second); } catch (...) { return def; }
-                    };
+                        try { return std::stoi(it->second); }
+                        catch (...) { return def; }
+                        };
                     auto getB = [&](const char* k, bool def) -> bool {
                         auto it = ev.rawFields.find(k);
                         if (it == ev.rawFields.end()) return def;
@@ -1000,7 +1538,7 @@ namespace {
                         if (v == "1" || v == "true" || v == "yes" || v == "on") return true;
                         if (v == "0" || v == "false" || v == "no" || v == "off") return false;
                         return def;
-                    };
+                        };
 
                     std::string transport = getS("transport");
                     for (auto& c : transport) c = (char)std::tolower((unsigned char)c);
@@ -1037,16 +1575,17 @@ namespace {
                     if (!r.ok) {
                         const auto msg = CATJ_webui_rt::WebUiRtServer::jsonEscape(r.error);
                         bridge.server().broadcastText(std::string("{\"type\":\"error\",\"message\":\"COMMS send failed: ") + msg + "\"}");
-                    } else {
+                    }
+                    else {
                         bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"COMMS send OK\"}");
                         // Push last RX immediately (history est aussi dispo via /api/comms_history)
                         if (r.haveReply) {
                             std::ostringstream js;
                             js << "{\"transport\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(transport)
-                               << "\",\"device\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(device)
-                               << "\",\"reply_ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(r.replyAscii)
-                               << "\",\"reply_hex\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(r.replyHex)
-                               << "\"}";
+                                << "\",\"device\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(device)
+                                << "\",\"reply_ascii\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(r.replyAscii)
+                                << "\",\"reply_hex\":\"" << CATJ_webui_rt::WebUiRtServer::jsonEscape(r.replyHex)
+                                << "\"}";
                             bridge.server().broadcastJsonEnvelope("comms_rx", js.str());
                         }
                         // broadcast config/histo optional
@@ -1068,11 +1607,13 @@ namespace {
             }
 
             const auto loopNow = std::chrono::steady_clock::now();
+            const int currentWebVideoFps = std::clamp(liveWebVideoFps.load(), 1, 30);
+            const int currentWebFramePeriodMs = std::max(1, 1000 / currentWebVideoFps);
             const bool videoFrameDue = streamCamera && camOk && (loopNow >= nextVideoFrameTs);
             const bool needCalibrationFrame = (baseMode == CATJ_utility::programme_mode::calibration) && !calibObjTemplate.empty();
 
             if (videoFrameDue) {
-                nextVideoFrameTs = loopNow + std::chrono::milliseconds(webFramePeriodMs);
+                nextVideoFrameTs = loopNow + std::chrono::milliseconds(currentWebFramePeriodMs);
             }
 
             cv::Mat frame;
@@ -1087,13 +1628,31 @@ namespace {
                 }
             }
 
-            std::vector<CATJ_robot_web::Detection> webDets = cachedWebDets;
-            if (visionEnabled && camOk) {
-                std::vector<CATJ_camera::BallDetection> dets;
-                cam.detectBalls(dets);
-                cachedWebDets = convertDetections(dets);
+            std::vector<CATJ_robot_web::Detection> webDets;
+            {
+                std::lock_guard<std::mutex> lk(cachedWebDetsMutex);
                 webDets = cachedWebDets;
-                bridge.updateDetections(cachedWebDets);
+            }
+
+            if (!asyncAiEnabled) {
+                const bool aiDue = liveVisionEnabled.load() && camOk && (loopNow >= nextAiTs);
+                const int aiPeriodMs = std::max(1, 1000 / std::max(1, cam.getAiFps()));
+                if (aiDue)
+                {
+                    nextAiTs = loopNow + std::chrono::milliseconds(aiPeriodMs);
+
+                    std::vector<CATJ_camera::BallDetection> dets;
+                    if (haveFrame) cam.detectBalls(frame, dets);
+                    else cam.detectBalls(dets);
+
+                    auto converted = convertDetections(dets);
+                    {
+                        std::lock_guard<std::mutex> lk(cachedWebDetsMutex);
+                        cachedWebDets = converted;
+                        webDets = cachedWebDets;
+                    }
+                    bridge.updateDetections(converted);
+                }
             }
 
             telem = bridge.telemetry();
@@ -1119,12 +1678,17 @@ namespace {
             telem.batteryV = 0.0;
 
             if (lidarEnabled && lidarOk) {
-                fillWebLidarTelemetry(
-                    telem.lidar,
-                    lidar.snapshot(),
-                    static_cast<std::size_t>(std::max(16, lidarWebMaxPoints)),
-                    lidarMaxDistMm
-                );
+                if (loopNow >= nextLidarWebTs || !cachedLidarValid) {
+                    fillWebLidarTelemetry(
+                        cachedLidarWeb,
+                        lidar.snapshot(),
+                        static_cast<std::size_t>(std::max(16, lidarWebMaxPoints)),
+                        lidarMaxDistMm
+                    );
+                    cachedLidarValid = true;
+                    nextLidarWebTs = loopNow + std::chrono::milliseconds(lidarWebPeriodMs);
+                }
+                telem.lidar = cachedLidarWeb;
             }
 
             telem.vision.objectDetected = !webDets.empty();
@@ -1197,14 +1761,17 @@ namespace {
             bridge.updateTelemetry(telem);
 
             if (videoFrameDue && haveFrame) {
-                if (visionEnabled) bridge.updateVideoFrame(frame, webDets);
+                if (liveVisionEnabled.load()) bridge.updateVideoFrame(frame, webDets);
                 else bridge.updateVideoFrame(frame);
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(webLoopSleepMs));
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(liveWebLoopSleepMs.load(), 1, 100)));
         }
 
         std::cout << "Arrêt du programme..." << std::endl;
+
+        aiWorkerRunning.store(false);
+        if (aiWorker.joinable()) aiWorker.join();
 
         if (lidarEnabled) {
             lidar.close();
@@ -1514,7 +2081,7 @@ namespace {
             if (now >= tNextLog) {
                 const int positivesVisible = static_cast<int>(std::count_if(robotBalls.begin(), robotBalls.end(), [](const auto& b) {
                     return b.isCollectible();
-                }));
+                    }));
 
                 std::cout << "[RAMASSAGE] t=" << std::fixed << std::setprecision(1) << elapsedSec
                     << "s | remaining=" << remainingSec
@@ -2080,13 +2647,13 @@ int main()
 
     std::cout << "Récupération des paramètres dans le fichier .ini" << std::endl;
     check_negzerror_ret(iniFile.load((prjPath / "parametres" / "config.ini").string()),
-        "Impossible de charger config.ini");
+        "Impossible de charger config.ini " + std::string((prjPath / "parametres" / "config.ini").string()));
 
     iniFile.get("GENERAL", "debug flag", debugMode);
     iniFile.get("GENERAL", "programme mode", str);
     mode = CATJ_utility::strToMode(str);
 
-	//mode camera par défaut si non spécifié, pour compatibilité avec les anciennes config.ini
+    //mode camera par défaut si non spécifié, pour compatibilité avec les anciennes config.ini
     bool remoteEnabled = iniFile.getOr("WEB", "remote", false);
 
     if (mode == CATJ_utility::programme_mode::remote) {
@@ -2161,6 +2728,10 @@ int main()
     iniFile.get("CAMERA", "show image", showImage);
     cam.setShow(showImage);
 
+    bool undistortEnabled = false;
+    iniFile.get("CAMERA", "undistort enabled", undistortEnabled);
+    cam.setUndistortEnabled(undistortEnabled);
+
     iniFile.get("CAMERA", "non maximum suppression threshold", fvalA);
     iniFile.get("CAMERA", "score threshold", fvalB);
     cam.setThresholds(fvalB, fvalA);
@@ -2193,6 +2764,8 @@ int main()
     iniFile.get("CAMERA", "video codec", imgCodec);
     iniFile.get("CAMERA", "video ext", imgExt);
     iniFile.get("CAMERA", "recording file path", str);
+
+    const int aiFps = std::clamp(cam.getAiFps() > 0 ? cam.getAiFps() : 6, 1, 30);
 
     std::cout << "Initialisation du timestamp pour le nom de fichier d'enregistrement" << std::endl;
     trimTime.fromStdString(CATJ_utility::now_timestamp());
@@ -2254,6 +2827,7 @@ int main()
     switch (mode)
     {
     case CATJ_utility::programme_mode::camera:
+    {
         std::cout << "Mode CAMERA\n";
         cam.startCapture(cam.getFps());
         if (flagRecording) {
@@ -2275,6 +2849,7 @@ int main()
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         break;
+    }
 
     case CATJ_utility::programme_mode::calibration:
         std::cout << "Mode CALIBRATION\n";

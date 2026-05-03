@@ -1,0 +1,7 @@
+# ============================================================
+# Elements a synchroniser vers la Raspberry Pi
+# Chemins relatifs a la racine du projet local IBM_Project_Bateau
+# ============================================================
+CMakeLists.txt
+sources
+parametres

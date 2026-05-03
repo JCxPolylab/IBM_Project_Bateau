@@ -105,6 +105,31 @@
             </div>
         </section>
 
+        <section class="panel cameraTuningPanel">
+            <div class="panelHead">
+                <div>
+                    <h2>Réglages INI caméra / IA</h2>
+                    <p class="muted smallText">Édition terrain de <code>parametres/config.ini</code>. Les champs “live” sont appliqués sans redémarrage ; les autres sont sauvegardés pour le prochain run.</p>
+                </div>
+                <div class="miniActions tuningActions">
+                    <button id="btnVisionCfgReload" class="secondary">Reload</button>
+                    <button id="btnVisionCfgApply">Appliquer live</button>
+                    <button id="btnVisionCfgSave">Save config.ini</button>
+                    <button id="btnVisionCfgMakeReset" class="secondary">Créer reset</button>
+                    <button id="btnVisionCfgReset" class="danger">Reset</button>
+                </div>
+            </div>
+
+            <div class="configStatusBox">
+                <div><span>config.ini</span><strong id="visionCfgPath">--</strong></div>
+                <div><span>reset</span><strong id="visionCfgResetPath">--</strong></div>
+                <div><span>runtime</span><strong id="visionCfgRuntime">--</strong></div>
+            </div>
+
+            <div id="visionCfgMessage" class="configMessage muted">Chargement des paramètres...</div>
+            <form id="visionCfgForm" class="configEditorGrid"></form>
+        </section>
+
         <section class="panel cameraControlsPanel">
             <div class="panelHead">
                 <h2>Réglages et commandes caméra</h2>

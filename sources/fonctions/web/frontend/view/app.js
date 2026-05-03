@@ -110,6 +110,12 @@
     statusDetection: $('statusDetection'),
     statusDetectionMini: $('statusDetectionMini'),
     cameraDetectionIndicator: $('cameraDetectionIndicator'),
+
+    visionCfgForm: $('visionCfgForm'),
+    visionCfgMessage: $('visionCfgMessage'),
+    visionCfgPath: $('visionCfgPath'),
+    visionCfgResetPath: $('visionCfgResetPath'),
+    visionCfgRuntime: $('visionCfgRuntime'),
   };
 
   const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
@@ -235,6 +241,24 @@
     });
   }
 
+  function postFormJson(url, bodyText = '') {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },
+      body: bodyText,
+      cache: 'no-store'
+    }).then(async (res) => {
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; }
+      catch { data = { ok: false, error: text || `HTTP ${res.status}` }; }
+      if (!res.ok || data.ok === false) {
+        throw new Error(data.error || data.message || `HTTP ${res.status}`);
+      }
+      return data;
+    });
+  }
+
   async function loadSystemProfile() {
     try {
       systemProfile = await fetchJson('/api/system_profile');
@@ -291,6 +315,252 @@
     setText(ui.profileLidarWebPoints, lidar.web_max_points !== undefined ? `${lidar.web_max_points}` : '--');
   }
 
+
+  let visionConfig = null;
+
+  function setVisionCfgMessage(msg, kind = '') {
+    if (!ui.visionCfgMessage) return;
+    ui.visionCfgMessage.textContent = msg;
+    ui.visionCfgMessage.classList.toggle('ok', kind === 'ok');
+    ui.visionCfgMessage.classList.toggle('err', kind === 'err');
+  }
+
+  function inputNameForField(field) {
+    return `${field.section}.${field.key}`;
+  }
+
+  const visionColorPalette = [
+    { name: 'red', label: 'Rouge cible (+10)', hex: '#ff0000' },
+    { name: 'orange', label: 'Orange ping-pong (-5)', hex: '#ff8a00' },
+    { name: 'white', label: 'Blanc', hex: '#ffffff' },
+    { name: 'blue', label: 'Bleu', hex: '#005dff' },
+    { name: 'unknown', label: 'Unknown / aucun', hex: '#808080' },
+  ];
+
+  function colorHexFromValue(value) {
+    const v = String(value || '').trim().toLowerCase();
+    if (/^#[0-9a-f]{6}$/i.test(v)) return v;
+    if (/^[0-9a-f]{6}$/i.test(v)) return '#' + v;
+    const found = visionColorPalette.find((c) => c.name === v);
+    return found ? found.hex : '#ff0000';
+  }
+
+  function makeSelectOptions(select, field) {
+    let options = [];
+    if (field.key === 'backend') options = ['auto', 'csi', 'gstreamer', 'usb', 'v4l2'];
+    else if (field.key === 'target color' || field.key === 'ignore color') options = visionColorPalette.map((c) => c.name).concat(['custom hex']);
+    else options = [field.value || ''];
+
+    for (const optValue of options) {
+      const opt = document.createElement('option');
+      opt.value = optValue === 'custom hex' ? '__custom__' : optValue;
+      opt.textContent = optValue || '--';
+      select.appendChild(opt);
+    }
+    const raw = String(field.value || '').trim().toLowerCase();
+    select.value = options.includes(raw) ? raw : (/^#?[0-9a-f]{6}$/i.test(raw) ? '__custom__' : (options[0] || ''));
+  }
+
+  function isColorConfigField(field) {
+    return field && field.section === 'CAMERA' && (field.key === 'target color' || field.key === 'ignore color');
+  }
+
+  function renderVisionConfig(cfg) {
+    visionConfig = cfg;
+    if (!ui.visionCfgForm) return;
+
+    setText(ui.visionCfgPath, maybeText(cfg.config_path));
+    setText(ui.visionCfgResetPath, cfg.reset_exists ? maybeText(cfg.reset_path) : `${maybeText(cfg.reset_path)} (absent)`);
+    const rt = cfg.runtime || {};
+    setText(ui.visionCfgRuntime, `video ${rt.web_video_fps ?? '--'} fps | JPEG ${rt.jpeg_quality ?? '--'} | sleep ${rt.web_loop_sleep_ms ?? '--'} ms`);
+
+    ui.visionCfgForm.innerHTML = '';
+    const fields = Array.isArray(cfg.fields) ? cfg.fields : [];
+
+    for (const field of fields) {
+      const wrap = document.createElement('div');
+      wrap.className = 'configField';
+
+      const label = document.createElement('label');
+      const labelText = document.createElement('span');
+      labelText.textContent = field.label || field.key;
+      label.appendChild(labelText);
+
+      const keyBadge = document.createElement('span');
+      keyBadge.className = 'configPill';
+      keyBadge.textContent = `${field.section}.${field.key}`;
+      label.appendChild(keyBadge);
+      wrap.appendChild(label);
+
+      let input;
+      if (field.type === 'bool') {
+        input = document.createElement('select');
+        for (const v of ['true', 'false']) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = v;
+          input.appendChild(opt);
+        }
+        const raw = String(field.value || '').trim().toLowerCase();
+        input.value = ['1', 'true', 'yes', 'on'].includes(raw) ? 'true' : 'false';
+      } else if (field.type === 'select') {
+        if (isColorConfigField(field)) {
+          input = document.createElement('input');
+          input.type = 'hidden';
+          input.value = field.value ?? '';
+
+          const colorBox = document.createElement('div');
+          colorBox.className = 'colorConfigBox';
+
+          const select = document.createElement('select');
+          makeSelectOptions(select, field);
+          colorBox.appendChild(select);
+
+          const picker = document.createElement('input');
+          picker.type = 'color';
+          picker.value = colorHexFromValue(field.value);
+          picker.title = 'Couleur personnalisée au format hexadécimal';
+          colorBox.appendChild(picker);
+
+          const palette = document.createElement('div');
+          palette.className = 'colorPalette';
+          visionColorPalette.forEach((c) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'colorSwatch';
+            b.title = c.label;
+            b.style.background = c.hex;
+            b.dataset.value = c.name;
+            b.addEventListener('click', () => {
+              select.value = c.name;
+              picker.value = c.hex;
+              input.value = c.name;
+            });
+            palette.appendChild(b);
+          });
+          colorBox.appendChild(palette);
+
+          select.addEventListener('change', () => {
+            if (select.value === '__custom__') input.value = picker.value;
+            else {
+              input.value = select.value;
+              picker.value = colorHexFromValue(select.value);
+            }
+          });
+          picker.addEventListener('input', () => {
+            select.value = '__custom__';
+            input.value = picker.value;
+          });
+
+          wrap.appendChild(colorBox);
+        } else {
+          input = document.createElement('select');
+          makeSelectOptions(input, field);
+        }
+      } else {
+        input = document.createElement('input');
+        input.type = field.type === 'number' ? 'number' : 'text';
+        input.value = field.value ?? '';
+        if (field.min !== '') input.min = field.min;
+        if (field.max !== '') input.max = field.max;
+        if (field.step !== '') input.step = field.step;
+      }
+
+      input.name = inputNameForField(field);
+      input.dataset.live = field.live ? '1' : '0';
+      input.dataset.restart = field.restart_required ? '1' : '0';
+      wrap.appendChild(input);
+
+      const meta = document.createElement('div');
+      meta.className = 'configMeta';
+      const livePill = document.createElement('span');
+      livePill.className = `configPill ${field.live ? 'live' : ''}`;
+      livePill.textContent = field.live ? 'live' : 'save only';
+      meta.appendChild(livePill);
+      if (field.restart_required) {
+        const restartPill = document.createElement('span');
+        restartPill.className = 'configPill restart';
+        restartPill.textContent = 'restart conseillé';
+        meta.appendChild(restartPill);
+      }
+      wrap.appendChild(meta);
+
+      ui.visionCfgForm.appendChild(wrap);
+    }
+  }
+
+  async function loadVisionConfig() {
+    if (!ui.visionCfgForm) return;
+    try {
+      setVisionCfgMessage('Chargement des paramètres...', '');
+      const data = await fetchJson('/api/vision_config');
+      renderVisionConfig(data);
+      setVisionCfgMessage('Paramètres chargés.', 'ok');
+    } catch (err) {
+      setVisionCfgMessage(`Erreur chargement config : ${err.message}`, 'err');
+      logLine(`Erreur /api/vision_config : ${err.message}`, 'logLineErr');
+    }
+  }
+
+  function serializeVisionConfigForm(liveOnly = false) {
+    if (!ui.visionCfgForm) return '';
+    const params = new URLSearchParams();
+    Array.from(ui.visionCfgForm.elements).forEach((el) => {
+      if (!el.name) return;
+      if (liveOnly && el.dataset.live !== '1') return;
+      params.append(el.name, el.value);
+    });
+    return params.toString();
+  }
+
+  async function applyVisionConfig() {
+    try {
+      const data = await postFormJson('/api/vision_config_apply', serializeVisionConfigForm(true));
+      setVisionCfgMessage(data.message || 'Paramètres live appliqués.', 'ok');
+      await loadSystemProfile();
+    } catch (err) {
+      setVisionCfgMessage(`Erreur application live : ${err.message}`, 'err');
+      logLine(`Vision config apply: ${err.message}`, 'logLineErr');
+    }
+  }
+
+  async function saveVisionConfig() {
+    try {
+      const data = await postFormJson('/api/vision_config_save', serializeVisionConfigForm(false));
+      setVisionCfgMessage(data.message || 'config.ini sauvegardé.', 'ok');
+      await loadSystemProfile();
+      await loadVisionConfig();
+    } catch (err) {
+      setVisionCfgMessage(`Erreur sauvegarde : ${err.message}`, 'err');
+      logLine(`Vision config save: ${err.message}`, 'logLineErr');
+    }
+  }
+
+  async function makeVisionReset() {
+    try {
+      const data = await postFormJson('/api/vision_config_make_reset');
+      setVisionCfgMessage(data.message || 'Fichier reset créé.', 'ok');
+      await loadVisionConfig();
+    } catch (err) {
+      setVisionCfgMessage(`Erreur création reset : ${err.message}`, 'err');
+      logLine(`Vision config make reset: ${err.message}`, 'logLineErr');
+    }
+  }
+
+  async function resetVisionConfig() {
+    const ok = window.confirm('Restaurer config.ini depuis config.reset.ini ? Les réglages courants seront remplacés.');
+    if (!ok) return;
+    try {
+      const data = await postFormJson('/api/vision_config_reset');
+      setVisionCfgMessage(data.message || 'config.ini restauré.', 'ok');
+      await loadSystemProfile();
+      await loadVisionConfig();
+    } catch (err) {
+      setVisionCfgMessage(`Erreur reset : ${err.message}`, 'err');
+      logLine(`Vision config reset: ${err.message}`, 'logLineErr');
+    }
+  }
+
   function connectWs() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
       return;
@@ -326,6 +596,8 @@
         const data = JSON.parse(ev.data);
         if (data.type === 'telemetry' && data.payload) {
           applyTelemetry(data.payload);
+        } else if (data.type === 'vision_config' && data.payload) {
+          renderVisionConfig(data.payload);
         } else if (data.type === 'echo') {
           logLine(`Echo: ${JSON.stringify(data.payload)}`);
         } else if (data.type === 'info' || data.type === 'error') {
@@ -863,6 +1135,12 @@
     sendWs({ type: 'command', action: 'camera', cmd: 'calibration' });
   });
 
+  bind('btnVisionCfgReload', 'click', loadVisionConfig);
+  bind('btnVisionCfgApply', 'click', applyVisionConfig);
+  bind('btnVisionCfgSave', 'click', saveVisionConfig);
+  bind('btnVisionCfgMakeReset', 'click', makeVisionReset);
+  bind('btnVisionCfgReset', 'click', resetVisionConfig);
+
   window.addEventListener('keydown', (ev) => {
     const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : '';
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
@@ -925,5 +1203,6 @@
   drawLidar([], 8000, { front: 0, right: 0, left: 0, rear: 0 });
   loadSystemProfile();
   loadInitialTelemetry();
+  loadVisionConfig();
   connectWs();
 })();

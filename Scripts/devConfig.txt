@@ -1,0 +1,29 @@
+# ============================================================
+# Configuration commune des scripts Raspberry Pi
+# ============================================================
+# CONFIG_MODE permet de choisir la carte cible.
+# Valeurs possibles : EPF ou PERSO
+
+CONFIG_MODE=EPF
+PI_PORT=22
+
+# Options de build CMake
+BUILD_TYPE=Release
+USE_ORT=ON
+USE_RPLIDAR=ON
+
+# Nom de l'executable genere par CMake dans build/
+PROGRAM_NAME=CATJ_ibmRobotProject
+
+# ===== Carte EPF =====
+EPF_USER=ibm_bateau
+EPF_HOST=10.53.68.211
+EPF_HOME=/home/ibm_bateau
+EPF_PROJECT_DIR=/home/ibm_bateau/code/jerryCamera
+#EPF_PROJECT_DIR=~/code/jerryCamera
+
+# ===== Carte personnelle / maison =====
+PERSO_USER=jerrycrozet
+PERSO_HOST=raspberrypi
+PERSO_HOME=/home/jerrycrozet
+PERSO_PROJECT_DIR=camera_project/venv/code/IBM_Bateau

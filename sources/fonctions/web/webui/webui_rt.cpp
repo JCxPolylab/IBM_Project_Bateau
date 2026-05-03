@@ -216,6 +216,7 @@ bool WebUiRtServer::start(const WebUiRtConfig& cfg)
 {
     stop();
     cfg_ = cfg;
+    jpegQualityRuntime_.store(std::clamp(cfg_.jpegQuality, 20, 100));
 
 #if !defined(_WIN32)
     // Prevent process termination when a client disconnects while we send data.
@@ -314,6 +315,16 @@ size_t WebUiRtServer::queuedCommandCount() const
     return cmdQueue_.size();
 }
 
+void WebUiRtServer::setJpegQuality(int quality)
+{
+    jpegQualityRuntime_.store(std::clamp(quality, 20, 100));
+}
+
+int WebUiRtServer::jpegQuality() const
+{
+    return jpegQualityRuntime_.load();
+}
+
 bool WebUiRtServer::updateFrame(const cv::Mat& frameBgr)
 {
     if (frameBgr.empty()) {
@@ -321,7 +332,7 @@ bool WebUiRtServer::updateFrame(const cv::Mat& frameBgr)
     }
 
     std::vector<uint8_t> jpeg;
-    std::vector<int> params{ cv::IMWRITE_JPEG_QUALITY, std::clamp(cfg_.jpegQuality, 20, 100) };
+    std::vector<int> params{ cv::IMWRITE_JPEG_QUALITY, jpegQualityRuntime_.load() };
     if (!cv::imencode(".jpg", frameBgr, jpeg, params)) {
         return false;
     }

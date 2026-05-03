@@ -100,10 +100,13 @@ namespace CATJ_camera {
         void setColorDecision(BallColor target, BallColor ignore) { targetColor_ = target; ignoreColor_ = ignore; }
         void setCalibrationMode(bool enabled) { calibrationMode_ = enabled; }
         bool calibrationMode() const { return calibrationMode_.load(); }
+        void setUndistortEnabled(bool enabled) { undistortEnabled_ = enabled; }
+        bool undistortEnabled() const { return undistortEnabled_; }
+        bool setCaptureProperty(int propId, double value);
 
         // Ex�cute IA (si net charg�) + couleur HSV
         bool detectBalls(std::vector<BallDetection>& out);
-        void setAIFps(int fps) { aiFps_ = std::max(1, fps); }
+        bool detectBalls(const cv::Mat& frame, std::vector<BallDetection>& out);
 
         double hw_focale_mm = 3.04;
 
@@ -117,6 +120,8 @@ namespace CATJ_camera {
 		float getSquareSizeCalibration() const { return calib_squareSize_; }
 		cv::Size getEchiquierSizeCalibration() const { return EchiquierSize_; }
 		int getAiFps() const { return aiFps_; }
+        float getConfThreshold() const { return confTh_; }
+        float getNmsThreshold() const { return nmsTh_; }
 		int getDevice() const { return _device; }
         std::string getcalibPath() const { return calibPath_; }
         std::vector<std::vector<cv::Point3f>> getObj() const { return objPts_; }

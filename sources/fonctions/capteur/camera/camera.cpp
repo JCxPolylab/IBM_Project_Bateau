@@ -186,17 +186,15 @@ void Camera::stopCapture() {
 void Camera::captureLoop_()
 {
     cv::Mat frame;
-    auto old_time = std::chrono::steady_clock::now();
-    auto new_time = std::chrono::steady_clock::now();
-    auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(new_time - old_time).count();
-	long long fps_tick = (int)(1000 / this->fps_);
+    const long long fpsTickMs = std::max<long long>(1, static_cast<long long>(1000.0 / std::max(1.0, this->fps_)));
 
-	std::cout << "Image shown status : " << isImageShown_ << std::endl;
-	std::cout << "save record status : " << recording_ << std::endl;
+    std::cout << "Image shown status : " << isImageShown_ << std::endl;
+    std::cout << "save record status : " << recording_ << std::endl;
 
     while (running_)
     {
-        old_time = std::chrono::steady_clock::now();
+        const auto t0 = std::chrono::steady_clock::now();
+
         cap_ >> frame;
 
         if (frame.empty()) {
@@ -206,45 +204,42 @@ void Camera::captureLoop_()
         }
 
         cv::Mat view = frame;
-        
-        // 1) Si on a calibr�, on peut undistort pour stabiliser les mesures
-        if (isCalibrated_ && undistortEnabled_) undistordFrame_(frame, view);
 
-        // La recherche d'echiquier est couteuse : elle est reservee au mode calibration.
-        // En mode autonome, on charge uniquement une calibration existante depuis le fichier .ini.
-        if (calibrationMode_.load() && !isCalibrated_ && !view.empty())
-        {
-            auto objTemplate = makeChessboard3D(EchiquierSize_, calib_squareSize_);
-            if (!objTemplate.empty())
-            {
-                isCalibrated_ = calibrateCamera(1, objTemplate, view, &frame);
-            }
+        // Undistort uniquement si demandé. Sur Raspberry Pi, cette étape peut coûter cher.
+        if (isCalibrated_ && undistortEnabled_) {
+            undistordFrame_(frame, view);
         }
-        
+
+        // Important performance : ne pas rechercher l'échiquier dans le thread caméra.
+        // La calibration est déclenchée uniquement par le mode calibration / la page web.
+
         if (isImageShown_)
         {
-            cv::putText(frame, "Focal avg : " + std::to_string(focalavg_),
+            cv::Mat display = view.empty() ? frame : view;
+            cv::putText(display, "Focal avg : " + std::to_string(focalavg_),
                 { 460, 20}, cv::FONT_HERSHEY_SIMPLEX, 0.5, {0,255,0}, 2);
-            cv::imshow("capture loop", frame);
-            cv::putText(frame, "Focal x : " + std::to_string(focal_x_),
+            cv::putText(display, "Focal x : " + std::to_string(focal_x_),
                 { 460, 50 }, cv::FONT_HERSHEY_SIMPLEX, 0.5, { 0,255,0 }, 2);
-            cv::imshow("capture loop", frame);
-            cv::putText(frame, "Focal y : " + std::to_string(focal_y_),
+            cv::putText(display, "Focal y : " + std::to_string(focal_y_),
                 { 460, 80 }, cv::FONT_HERSHEY_SIMPLEX, 0.5, { 0,255,0 }, 2);
-            cv::imshow("capture loop", frame);
-
+            cv::imshow("capture loop", display);
             keyPolled_.store(cv::pollKey());
         }
 
-        std::lock_guard<std::mutex> lk(m_);
-        frame.copyTo(latest_);
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            (view.empty() ? frame : view).copyTo(latest_);
+        }
 
-        if (recording_ && writer_.isOpened()) writer_.write(frame);
+        if (recording_ && writer_.isOpened()) {
+            writer_.write(view.empty() ? frame : view);
+        }
 
-		new_time = std::chrono::steady_clock::now();
-        interval = std::chrono::duration_cast<std::chrono::milliseconds>(new_time - old_time).count();
-        if(fps_tick > interval)
-            std::this_thread::sleep_for(std::chrono::milliseconds(fps_tick - interval));
+        const auto dtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (fpsTickMs > dtMs) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(fpsTickMs - dtMs));
+        }
     }
 }
 
@@ -254,6 +249,13 @@ bool Camera::getLatestFrame(cv::Mat& out) {
     if (latest_.empty()) return false;
     latest_.copyTo(out);
     return true;
+}
+
+
+bool Camera::setCaptureProperty(int propId, double value)
+{
+    if (!cap_.isOpened()) return false;
+    return cap_.set(propId, value);
 }
 
 bool Camera::startRecording(const std::string& filename, double fps, const std::string& fourcc)
@@ -912,10 +914,10 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
 }
 */
 
-bool Camera::detectBalls(std::vector<BallDetection>& outDets)
+bool Camera::detectBalls(const cv::Mat& frame, std::vector<BallDetection>& outDets)
 {
     outDets.clear();
-
+    if (frame.empty()) return false;
 
     // Si aucun backend n'est chargé, pas de détection possible
 #ifdef CATJ_USE_ORT
@@ -928,24 +930,6 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
     }
 #endif
 
-    // --- throttle IA ---
-    const auto now = std::chrono::steady_clock::now();
-    const int safeAiFps = std::max(1, aiFps_);
-    const auto period = std::chrono::milliseconds(1000 / safeAiFps);
-
-    if (lastInfer_ != std::chrono::steady_clock::time_point::min() &&
-        (now - lastInfer_) < period)
-    {
-        outDets = lastDets_;
-        return !outDets.empty();
-    }
-
-    cv::Mat frame;
-    if (!getLatestFrame(frame)) {
-        return false;
-    }
-
-
     // --- preprocess (letterbox + blob) ---
     LetterboxInfo info{};
     cv::Mat lb = letterbox_(frame, onnx_inputSize_, info);
@@ -955,11 +939,8 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
         cv::Scalar(), true /*swapRB*/, false /*crop*/, CV_32F
     );
 
-    cv::Mat outMat; // sortie réseau sous forme Mat (2D/3D selon modèle)
+    cv::Mat outMat;
 
-    // ==========================
-    //  A) ORT (si compilé)
-    // ==========================
 #ifdef CATJ_USE_ORT
     if (ortLoaded_)
     {
@@ -993,8 +974,6 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
         auto& out0 = outputs[0];
         auto ti = out0.GetTensorTypeAndShapeInfo();
         auto shape = ti.GetShape();
-
-
         float* outData = out0.GetTensorMutableData<float>();
 
         if (shape.size() == 3) {
@@ -1011,23 +990,15 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
     }
     else
 #endif
-    // ==========================
-    //  B) OpenCV DNN (fallback)
-    // ==========================
     {
-        // Ici, on utilise cv::dnn::Net si chargé
         if (!netLoaded_) return false;
-
         net_.setInput(blob);
-
         std::vector<cv::Mat> outs;
         net_.forward(outs, net_.getUnconnectedOutLayersNames());
         if (outs.empty()) return false;
-
-        outMat = outs[0]; // outMat peut être dims=2 ou dims=3, ton decode gère
+        outMat = outs[0];
     }
 
-    // --- Decode + NMS ---
     std::vector<cv::Rect> boxes;
     std::vector<float> scores;
     decodeDetections_(outMat, info, frame.cols, frame.rows, boxes, scores);
@@ -1047,14 +1018,35 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
         dets.push_back(d);
     }
 
-
-    // cache + timestamp
-    lastInfer_ = now;
-    lastDets_ = dets;   
+    lastDets_ = dets;
     outDets = std::move(dets);
-
     return !outDets.empty();
 }
+
+bool Camera::detectBalls(std::vector<BallDetection>& outDets)
+{
+    outDets.clear();
+
+    const auto now = std::chrono::steady_clock::now();
+    const int safeAiFps = std::max(1, aiFps_);
+    const auto period = std::chrono::milliseconds(1000 / safeAiFps);
+
+    if (lastInfer_ != std::chrono::steady_clock::time_point::min() &&
+        (now - lastInfer_) < period)
+    {
+        outDets = lastDets_;
+        return !outDets.empty();
+    }
+
+    cv::Mat frame;
+    if (!getLatestFrame(frame)) {
+        return false;
+    }
+
+    lastInfer_ = now;
+    return detectBalls(frame, outDets);
+}
+
 
 
 
