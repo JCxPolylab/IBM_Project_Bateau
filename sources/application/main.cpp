@@ -264,6 +264,109 @@ namespace {
         }
     }
 
+    class AsyncBallDetector_ {
+    public:
+        struct Snapshot {
+            std::vector<CATJ_camera::BallDetection> detections;
+            int frameWidth = 0;
+            int frameHeight = 0;
+            double inferenceMs = 0.0;
+            uint64_t sequence = 0;
+            bool valid = false;
+            std::chrono::steady_clock::time_point timestamp{};
+        };
+
+        AsyncBallDetector_() = default;
+        ~AsyncBallDetector_() { stop(); }
+
+        AsyncBallDetector_(const AsyncBallDetector_&) = delete;
+        AsyncBallDetector_& operator=(const AsyncBallDetector_&) = delete;
+
+        void start(CATJ_camera::Camera& cam, std::atomic<bool>* enabledFlag)
+        {
+            if (running_.exchange(true)) return;
+
+            worker_ = std::thread([this, &cam, enabledFlag]() {
+                auto nextRun = std::chrono::steady_clock::now();
+
+                while (running_.load()) {
+                    if (enabledFlag && !enabledFlag->load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                        nextRun = std::chrono::steady_clock::now();
+                        continue;
+                    }
+
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now < nextRun) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        continue;
+                    }
+
+                    cv::Mat frame;
+                    if (!cam.getLatestFrame(frame) || frame.empty()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        continue;
+                    }
+
+                    std::vector<CATJ_camera::BallDetection> dets;
+                    const auto t0 = std::chrono::steady_clock::now();
+                    (void)cam.detectBalls(frame, dets);
+                    const auto t1 = std::chrono::steady_clock::now();
+
+                    Snapshot snap;
+                    snap.detections = std::move(dets);
+                    snap.frameWidth = frame.cols;
+                    snap.frameHeight = frame.rows;
+                    snap.inferenceMs = static_cast<double>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000.0;
+                    snap.timestamp = t1;
+                    snap.valid = true;
+
+                    {
+                        std::lock_guard<std::mutex> lk(m_);
+                        snap.sequence = latest_.sequence + 1;
+                        latest_ = std::move(snap);
+                    }
+
+                    // Cadencement volontaire après la fin de l'inférence.
+                    // Si le modèle est plus lent que la consigne, aucune file d'attente
+                    // ne se forme : on saute simplement des images et on garde la plus récente.
+                    const int aiPeriodMs = std::max(1, 1000 / std::max(1, cam.getAiFps()));
+                    nextRun = std::chrono::steady_clock::now() + std::chrono::milliseconds(aiPeriodMs);
+                }
+            });
+        }
+
+        void stop()
+        {
+            running_.store(false);
+            if (worker_.joinable()) worker_.join();
+        }
+
+        bool snapshot(Snapshot& out) const
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (!latest_.valid) return false;
+            out = latest_;
+            return true;
+        }
+
+        bool snapshotFresh(Snapshot& out, int maxAgeMs) const
+        {
+            if (!snapshot(out)) return false;
+            if (maxAgeMs <= 0) return true;
+            const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - out.timestamp).count();
+            return ageMs <= maxAgeMs;
+        }
+
+    private:
+        std::atomic<bool> running_{ false };
+        std::thread worker_;
+        mutable std::mutex m_;
+        Snapshot latest_;
+    };
+
 
     static int hexVal_(char c)
     {
@@ -553,10 +656,12 @@ namespace {
             {"IA", "ONNX model path", "text", "Modèle ONNX", "", "", "", false, true},
             {"WEB", "vision enabled", "bool", "Vision IA web", "", "", "", true, false},
             {"WEB", "async ai enabled", "bool", "IA asynchrone", "", "", "", false, true},
+            {"WEB", "ai stale clear ms", "number", "Durée cache IA web ms", "100", "10000", "50", false, true},
             {"WEB", "stream camera", "bool", "Flux caméra web", "", "", "", false, true},
             {"WEB", "video fps", "number", "FPS vidéo web", "1", "30", "1", true, false},
             {"WEB", "jpeg quality", "number", "Qualité JPEG web", "20", "100", "1", true, false},
-            {"WEB", "loop sleep ms", "number", "Sleep boucle web", "1", "100", "1", true, false}
+            {"WEB", "loop sleep ms", "number", "Sleep boucle web", "1", "100", "1", true, false},
+            {"RAMASSAGE", "vision stale max ms", "number", "Durée cache IA ramassage ms", "100", "5000", "50", false, true}
         };
 
         auto esc = CATJ_webui_rt::WebUiRtServer::jsonEscape;
@@ -897,8 +1002,9 @@ namespace {
                 {"CAMERA", "calibration file"}, {"CAMERA", "echiquier size"}, {"CAMERA", "square size"},
                 {"CAMERA", "nombres de prise pour la calibration"},
                 {"IA", "ONNX model path"},
-                {"WEB", "vision enabled"}, {"WEB", "async ai enabled"}, {"WEB", "stream camera"}, {"WEB", "video fps"},
-                {"WEB", "jpeg quality"}, {"WEB", "loop sleep ms"}
+                {"WEB", "vision enabled"}, {"WEB", "async ai enabled"}, {"WEB", "ai stale clear ms"},
+                {"WEB", "stream camera"}, {"WEB", "video fps"}, {"WEB", "jpeg quality"}, {"WEB", "loop sleep ms"},
+                {"RAMASSAGE", "vision stale max ms"}
             };
             return std::find(allowed.begin(), allowed.end(), std::make_pair(section, key)) != allowed.end();
         };
@@ -1384,46 +1490,15 @@ namespace {
             << " async_ai=" << (asyncAiEnabled ? "ON" : "OFF") << std::endl;
 
         bool shouldQuit = false;
-        std::atomic<bool> aiWorkerRunning{ false };
-        std::thread aiWorker;
+
+        // Thread IA dédié + cache one-slot : aucune accumulation de frames.
+        // La boucle web lit uniquement le dernier résultat disponible, donc elle
+        // ne bloque plus sur ORT/OpenCV DNN quand le modèle est lent.
+        AsyncBallDetector_ aiDetector;
+        uint64_t lastAiSeqSeen = 0;
+        const int aiStaleClearMs = std::clamp(iniFile.getOr("WEB", "ai stale clear ms", 1200), 100, 10000);
         if (asyncAiEnabled && streamCamera && camOk) {
-            aiWorkerRunning.store(true);
-            aiWorker = std::thread([&]() {
-                auto nextRun = std::chrono::steady_clock::now();
-                while (aiWorkerRunning.load() && bridge.isRunning()) {
-                    const auto nowAi = std::chrono::steady_clock::now();
-                    if (!liveVisionEnabled.load()) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                        nextRun = std::chrono::steady_clock::now();
-                        continue;
-                    }
-                    if (nowAi < nextRun) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                        continue;
-                    }
-                    const int aiPeriodMs = std::max(1, 1000 / std::max(1, cam.getAiFps()));
-
-                    cv::Mat aiFrame;
-                    if (!cam.getLatestFrame(aiFrame) || aiFrame.empty()) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                        continue;
-                    }
-
-                    std::vector<CATJ_camera::BallDetection> dets;
-                    cam.detectBalls(aiFrame, dets);
-                    auto web = convertDetections(dets);
-                    {
-                        std::lock_guard<std::mutex> lk(cachedWebDetsMutex);
-                        cachedWebDets = web;
-                    }
-                    bridge.updateDetections(web);
-
-                    // Cadencement volontaire après l'inférence : si l'IA est lente,
-                    // on ne lance pas une nouvelle inférence immédiatement. Cela évite
-                    // de saturer un cœur CPU en continu et garde le web/contrôle réactifs.
-                    nextRun = std::chrono::steady_clock::now() + std::chrono::milliseconds(aiPeriodMs);
-                }
-            });
+            aiDetector.start(cam, &liveVisionEnabled);
         }
 
         while (bridge.isRunning() && !shouldQuit)
@@ -1634,7 +1709,33 @@ namespace {
                 webDets = cachedWebDets;
             }
 
-            if (!asyncAiEnabled) {
+            if (asyncAiEnabled) {
+                AsyncBallDetector_::Snapshot snap;
+                if (aiDetector.snapshot(snap)) {
+                    const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        loopNow - snap.timestamp).count();
+
+                    if (snap.sequence != lastAiSeqSeen) {
+                        lastAiSeqSeen = snap.sequence;
+                        auto converted = convertDetections(snap.detections);
+                        {
+                            std::lock_guard<std::mutex> lk(cachedWebDetsMutex);
+                            cachedWebDets = converted;
+                            webDets = cachedWebDets;
+                        }
+                        bridge.updateDetections(converted);
+                    }
+                    else if (ageMs > aiStaleClearMs && !cachedWebDets.empty()) {
+                        // Si l'IA est désactivée ou bloquée trop longtemps, on évite
+                        // de conserver une cible fantôme dans l'interface.
+                        std::lock_guard<std::mutex> lk(cachedWebDetsMutex);
+                        cachedWebDets.clear();
+                        webDets.clear();
+                        bridge.updateDetections(cachedWebDets);
+                    }
+                }
+            }
+            else {
                 const bool aiDue = liveVisionEnabled.load() && camOk && (loopNow >= nextAiTs);
                 const int aiPeriodMs = std::max(1, 1000 / std::max(1, cam.getAiFps()));
                 if (aiDue)
@@ -1770,8 +1871,7 @@ namespace {
 
         std::cout << "Arrêt du programme..." << std::endl;
 
-        aiWorkerRunning.store(false);
-        if (aiWorker.joinable()) aiWorker.join();
+        aiDetector.stop();
 
         if (lidarEnabled) {
             lidar.close();
@@ -1847,6 +1947,10 @@ namespace {
         cfg.ballOrangeDiameterM = iniFile.getOr("RAMASSAGE", "ball orange diameter m", cfg.ballOrangeDiameterM);
         cfg.ballPiscineDiameterM = iniFile.getOr("RAMASSAGE", "ball piscine diameter m", cfg.ballPiscineDiameterM);
         cfg.hfovDeg = iniFile.getOr("RAMASSAGE", "camera hfov deg", cfg.hfovDeg);
+
+        // Le pilotage autonome ne doit pas attendre l'inférence IA.
+        // Cette durée définit pendant combien de temps on accepte le dernier résultat IA.
+        const int visionStaleMaxMs = std::clamp(iniFile.getOr("RAMASSAGE", "vision stale max ms", 700), 100, 5000);
 
         const bool boardEnabled = iniFile.getOr("MOTHERBOARD", "enabled", true);
         const std::string boardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
@@ -1980,6 +2084,14 @@ namespace {
         bool shouldQuit = false;
         std::optional<float> lastHeadingDeg;
 
+        // Thread IA autonome : il met à jour un cache one-slot. La boucle de
+        // navigation reste disponible pour l'UART, le LiDAR et les commandes moteurs.
+        std::atomic<bool> ramVisionEnabled{ true };
+        AsyncBallDetector_ ramAiDetector;
+        ramAiDetector.start(cam, &ramVisionEnabled);
+        uint64_t lastRamVisionSeq = 0;
+        std::vector<CATJ_robot::RobotBall> cachedRobotBalls;
+
         while (!shouldQuit) {
             const auto now = std::chrono::steady_clock::now();
             const double elapsedSec = std::chrono::duration_cast<std::chrono::milliseconds>(now - tStart).count() / 1000.0;
@@ -1993,13 +2105,23 @@ namespace {
                 tNextHeartbeat = now + std::chrono::milliseconds(cfg.heartbeatPeriodMs);
             }
 
-            cv::Mat frame;
-            const bool haveFrame = cam.getLatestFrame(frame);
-
-            std::vector<CATJ_camera::BallDetection> rawDetections;
             std::vector<CATJ_robot::RobotBall> robotBalls;
-            if (haveFrame && cam.detectBalls(rawDetections)) {
-                robotBalls = ballLogic.convert(cam, rawDetections, frame.cols, frame.rows);
+            AsyncBallDetector_::Snapshot visionSnap;
+            if (ramAiDetector.snapshotFresh(visionSnap, visionStaleMaxMs)) {
+                if (visionSnap.sequence != lastRamVisionSeq) {
+                    lastRamVisionSeq = visionSnap.sequence;
+                    cachedRobotBalls = ballLogic.convert(
+                        cam,
+                        visionSnap.detections,
+                        std::max(1, visionSnap.frameWidth),
+                        std::max(1, visionSnap.frameHeight));
+                }
+                robotBalls = cachedRobotBalls;
+            }
+            else {
+                // Données IA trop anciennes : on repasse en recherche au lieu de suivre
+                // une cible potentiellement obsolète.
+                cachedRobotBalls.clear();
             }
 
             CATJ_lidar::SectorDistances sectors;
@@ -2122,6 +2244,9 @@ namespace {
 
             std::this_thread::sleep_for(std::chrono::milliseconds(std::max(10, cfg.loopSleepMs)));
         }
+
+        ramVisionEnabled.store(false);
+        ramAiDetector.stop();
 
         const bool lockSent = course.lockCollection(board);
         bool lockAckOk = false;

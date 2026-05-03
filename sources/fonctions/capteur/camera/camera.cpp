@@ -919,6 +919,10 @@ bool Camera::detectBalls(const cv::Mat& frame, std::vector<BallDetection>& outDe
     outDets.clear();
     if (frame.empty()) return false;
 
+    // Un seul Run réseau à la fois. Cela évite les courses entre le thread IA
+    // asynchrone, le mode web synchrone éventuel et les outils de debug.
+    std::lock_guard<std::mutex> inferLock(inferMutex_);
+
     // Si aucun backend n'est chargé, pas de détection possible
 #ifdef CATJ_USE_ORT
     if (!ortLoaded_ && !netLoaded_) {
@@ -1018,7 +1022,12 @@ bool Camera::detectBalls(const cv::Mat& frame, std::vector<BallDetection>& outDe
         dets.push_back(d);
     }
 
-    lastDets_ = dets;
+    {
+        std::lock_guard<std::mutex> cacheLock(detectionCacheMutex_);
+        lastInfer_ = std::chrono::steady_clock::now();
+        lastDets_ = dets;
+    }
+
     outDets = std::move(dets);
     return !outDets.empty();
 }
@@ -1031,11 +1040,14 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
     const int safeAiFps = std::max(1, aiFps_);
     const auto period = std::chrono::milliseconds(1000 / safeAiFps);
 
-    if (lastInfer_ != std::chrono::steady_clock::time_point::min() &&
-        (now - lastInfer_) < period)
     {
-        outDets = lastDets_;
-        return !outDets.empty();
+        std::lock_guard<std::mutex> cacheLock(detectionCacheMutex_);
+        if (lastInfer_ != std::chrono::steady_clock::time_point::min() &&
+            (now - lastInfer_) < period)
+        {
+            outDets = lastDets_;
+            return !outDets.empty();
+        }
     }
 
     cv::Mat frame;
@@ -1043,7 +1055,6 @@ bool Camera::detectBalls(std::vector<BallDetection>& outDets)
         return false;
     }
 
-    lastInfer_ = now;
     return detectBalls(frame, outDets);
 }
 

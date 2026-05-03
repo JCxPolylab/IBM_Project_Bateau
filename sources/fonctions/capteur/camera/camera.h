@@ -190,10 +190,15 @@ namespace CATJ_camera {
         int aiFps_ = 5; // 5 FPS par d�faut
         std::chrono::steady_clock::time_point lastInfer_ = std::chrono::steady_clock::time_point::min();
         std::vector<BallDetection> lastDets_;
+        mutable std::mutex detectionCacheMutex_;
 
         cv::VideoCapture cap_;
         cv::VideoWriter writer_;
         cv::dnn::Net net_;
+        // Protège la session IA (ORT/OpenCV DNN). La capture caméra a son propre mutex,
+        // mais l'inférence ne doit pas pouvoir être lancée simultanément depuis
+        // deux chemins d'exécution (web + mode autonome, par exemple).
+        mutable std::mutex inferMutex_;
         bool netLoaded_ = false;
 
         int w_ = 640, h_ = 480;
