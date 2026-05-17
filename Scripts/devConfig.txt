@@ -17,7 +17,7 @@ PROGRAM_NAME=CATJ_ibmRobotProject
 
 # ===== Carte EPF =====
 EPF_USER=ibm_bateau
-EPF_HOST=10.53.68.211
+EPF_HOST=10.196.128.211
 EPF_HOME=/home/ibm_bateau
 EPF_PROJECT_DIR=/home/ibm_bateau/code/jerryCamera
 #EPF_PROJECT_DIR=~/code/jerryCamera
