@@ -219,6 +219,16 @@
 
       if (prevDevice && (currentSection.devices || []).some((d) => d.spec === prevDevice)) {
         ui.device.value = prevDevice;
+      } else if (selectedTransport === 'uart') {
+        // Pour le robot, on privilégie l'UART GPIO de la Raspberry validé avec le test Python.
+        const preferred = (currentSection.devices || []).find((d) =>
+          /motherboard|pi uart|serial0/i.test(`${d.name} ${d.spec}`)
+        );
+        if (preferred) {
+          ui.device.value = preferred.spec;
+        } else if (ui.device.options.length > 0) {
+          ui.device.selectedIndex = 0;
+        }
       } else if (ui.device.options.length > 0) {
         ui.device.selectedIndex = 0;
       }
@@ -378,13 +388,18 @@
       return;
     }
 
+    const appendNl = ui.appendNl?.checked ? 'true' : 'false';
+    if ((transport || '').toLowerCase() === 'uart' && appendNl !== 'true') {
+      logLine('[warn] UART Arduino: append \n est désactivé, la Mega attendra probablement la fin de ligne.', 'logLineErr');
+    }
+
     const msg = {
       action: 'comms_send',
       transport: esc(transport),
       device: esc(device),
       payload: esc(payload),
       encoding: esc(ui.encoding?.value || 'ascii'),
-      append_nl: ui.appendNl?.checked ? 'true' : 'false',
+      append_nl: appendNl,
       expect_reply: ui.expectReply?.checked ? 'true' : 'false',
       reply_mode: esc(ui.replyMode?.value || 'line'),
       timeout_ms: esc(ui.timeoutMs?.value || '250'),

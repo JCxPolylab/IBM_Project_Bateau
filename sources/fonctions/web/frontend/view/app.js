@@ -577,12 +577,17 @@
       logLine('WebSocket connecté.');
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('error', () => {
+      logLine('WebSocket error : connexion impossible ou frame invalide.', 'logLineErr');
+    });
+
+    ws.addEventListener('close', (ev) => {
       setText(ui.wsBadge, 'WS disconnected');
       if (ui.wsBadge) {
         ui.wsBadge.classList.remove('badge-on');
         ui.wsBadge.classList.add('badge-off');
       }
+      logLine(`WebSocket fermé: code=${ev.code || 0} reason=${ev.reason || ''}`, 'logLineErr');
       if (!reconnectTimer) {
         reconnectTimer = window.setTimeout(() => {
           reconnectTimer = null;
@@ -619,6 +624,32 @@
     }
     ws.send(JSON.stringify(obj));
     logLine(JSON.stringify(obj), 'logLineTx');
+  }
+
+  async function requestProgramStop() {
+    const payload = { type: 'command', action: 'programme', cmd: 'stop' };
+
+    let sentByWs = false;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify(payload));
+        sentByWs = true;
+        logLine(JSON.stringify(payload), 'logLineTx');
+      } catch (err) {
+        logLine(`STOP WS impossible: ${err.message}`, 'logLineErr');
+      }
+    } else {
+      logLine('STOP: WebSocket non connecté, fallback HTTP.', 'logLineErr');
+    }
+
+    try {
+      const r = await fetch('/api/program_stop', { method: 'POST' });
+      const text = await r.text();
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${text}`);
+      logLine(sentByWs ? 'STOP programme envoyé par WS + HTTP fallback.' : 'STOP programme envoyé par HTTP fallback.');
+    } catch (err) {
+      logLine(`STOP HTTP impossible: ${err.message}`, 'logLineErr');
+    }
   }
 
   function sendIfManual(payload) {
@@ -1127,7 +1158,7 @@
   bind('btnSTOPprogramme', 'click', () => {
     const state = window.confirm('Êtes-vous sûr de vouloir arrêter le programme ?');
     if (state) {
-      sendWs({ type: 'command', action: 'programme', cmd: 'stop' });
+      requestProgramStop();
     }
   });
 

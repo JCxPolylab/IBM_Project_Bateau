@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <sstream>
+#include <iostream>
 
 namespace CATJ_robot {
 
@@ -117,6 +118,7 @@ bool MotherboardLink::sendLine_(const std::string& line)
     if (!uart_.isOpen()) {
         return false;
     }
+    std::cout << "[MB TX] " << line << std::endl;
     return uart_.writeString(line + "\n") > 0;
 }
 

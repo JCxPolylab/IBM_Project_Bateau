@@ -63,11 +63,11 @@
 
           <label>
             Device spec (manuel)
-            <input id="deviceSpec" type="text" placeholder="/dev/ttyUSB0@460800 | server#1 | tcp://0.0.0.0:5000 | /dev/i2c-1@0x42 | /dev/spidev0.0@1000000#0+8" />
+            <input id="deviceSpec" type="text" placeholder="/dev/serial0@115200 | /dev/ttyUSB0@460800 | server#1 | tcp://0.0.0.0:5000 | /dev/i2c-1@0x42 | /dev/spidev0.0@1000000#0+8" />
           </label>
 
           <div class="hint">
-            <div><span class="kbd">UART</span> ex: <code>/dev/ttyUSB0@460800</code></div>
+            <div><span class="kbd">UART carte mère</span> ex: <code>/dev/serial0@115200</code> — USB/LiDAR ex: <code>/dev/ttyUSB0@460800</code></div>
             <div><span class="kbd">BT</span> ex: <code>server#1</code> ou <code>DC:A6:32:11:22:33#1</code></div>
             <div><span class="kbd">NET</span> ex: <code>tcp://0.0.0.0:5000</code> ou <code>udp://0.0.0.0:5000</code></div>
             <div><span class="kbd">I²C</span> ex: <code>/dev/i2c-1@0x42</code></div>

@@ -547,7 +547,13 @@ std::string CommsListenService::scanJson()
     };
 
     std::vector<std::pair<std::string,std::string>> uartDevs;
-    for (const auto& d : uarts) uartDevs.push_back({d, d + "@460800"});
+    for (const auto& d : uarts) {
+        // GPIO UART Raspberry Pi (serial0/serial1) : utilise par la carte mere.
+        // Le baudrate du protocole carte mere est 115200. Ne pas proposer 460800 ici,
+        // car ouvrir /dev/serial0 a 460800 depuis Comms Listen reconfigure le port
+        // et rend les trames envoyees par le mode autonome illisibles cote Arduino.
+        uartDevs.push_back({d, d + "@115200"});
+    }
     writeDevices("uart", uartDevs, true);
 
     std::vector<std::pair<std::string,std::string>> usbDevs;
@@ -598,6 +604,18 @@ void CommsListenService::threadMain_()
             emit_({ nowMs_(), "err", tr, req.deviceSpec, "ascii", "invalid uart spec" });
             return;
         }
+
+#if !defined(_WIN32)
+        // Protection projet : /dev/serial0 et /dev/ttyS0 sont les broches UART
+        // GPIO14/GPIO15 vers la carte mere. Dans notre protocole elles doivent rester
+        // en 115200 bauds. Cela evite qu'un onglet Listen ouvert par erreur en 460800
+        // casse les trames du mode autonome.
+        if ((port == "/dev/serial0" || port == "/dev/ttyS0") && baud != 115200) {
+            setError_("/dev/serial0 must be opened at 115200 bauds for motherboard UART");
+            emit_({ nowMs_(), "err", tr, req.deviceSpec, "ascii", "/dev/serial0 must be opened at 115200 bauds" });
+            return;
+        }
+#endif
 
         CATJ_uart::Uart uart;
         CATJ_uart::UartConfig cfg;

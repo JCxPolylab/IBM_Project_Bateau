@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <iostream>
 
 #if defined(_WIN32)
     #ifndef NOMINMAX
@@ -710,7 +711,18 @@ bool WebUiRtServer::handleWebSocketUpgrade_(SocketHandle sock, const HttpRequest
     }
     if (provider) {
         try {
-            sendWebSocketText_(sock, toJsonEnvelope("telemetry", provider()));
+            // Protéger aussi l'envoi initial : le thread telemetryLoop_ peut déjà
+            // broadcaster sur ce même socket dès que le client est ajouté dans
+            // wsClients_. Sans ce verrou, deux frames WebSocket peuvent s'entrelacer
+            // et le navigateur ferme immédiatement la connexion avec une erreur
+            // protocolaire.
+            std::lock_guard<std::mutex> sendLock(client->sendMutex);
+            if (!sendWebSocketText_(sock, toJsonEnvelope("telemetry", provider()))) {
+                client->alive.store(false);
+                closeSocket_(sock);
+                removeDeadWebSockets_();
+                return false;
+            }
         }
         catch (...) {}
     }

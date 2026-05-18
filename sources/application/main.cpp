@@ -24,10 +24,10 @@
 #define DIR_NAME "IBM_Project_Bateau"
 
 // Dir raspi Jerry
-#define DIR_NAME_LINUX "IBM_Bateau"
+//#define DIR_NAME_LINUX "IBM_Bateau"
 
 // Dir raspi EPF
-//#define DIR_NAME_LINUX "jerryCamera"
+#define DIR_NAME_LINUX "jerryCamera"
 
 #ifdef WIN32
 #include <windows.h>
@@ -276,21 +276,37 @@ namespace {
             std::chrono::steady_clock::time_point timestamp{};
         };
 
+        struct PersistenceConfig {
+            int maxMisses = 3;       // Nombre de cycles IA sans détection avant suppression.
+            int maxAgeMs = 900;      // Sécurité temporelle absolue contre les cibles fantômes.
+            float matchIou = 0.12f;  // Tolérance de recouvrement entre deux boîtes.
+
+            PersistenceConfig(int misses = 3, int ageMs = 900, float iou = 0.12f)
+                : maxMisses(misses), maxAgeMs(ageMs), matchIou(iou)
+            {}
+        };
+
+
         AsyncBallDetector_() = default;
         ~AsyncBallDetector_() { stop(); }
 
         AsyncBallDetector_(const AsyncBallDetector_&) = delete;
         AsyncBallDetector_& operator=(const AsyncBallDetector_&) = delete;
 
-        void start(CATJ_camera::Camera& cam, std::atomic<bool>* enabledFlag)
+        void start(CATJ_camera::Camera& cam, std::atomic<bool>* enabledFlag, PersistenceConfig persistence = {})
         {
             if (running_.exchange(true)) return;
+            persistence_.maxMisses = std::max(0, persistence.maxMisses);
+            persistence_.maxAgeMs = std::max(0, persistence.maxAgeMs);
+            persistence_.matchIou = std::clamp(persistence.matchIou, 0.0f, 1.0f);
 
             worker_ = std::thread([this, &cam, enabledFlag]() {
                 auto nextRun = std::chrono::steady_clock::now();
 
                 while (running_.load()) {
                     if (enabledFlag && !enabledFlag->load()) {
+                        clearTracks_();
+                        publishSnapshot_({}, 0, 0, 0.0, std::chrono::steady_clock::now());
                         std::this_thread::sleep_for(std::chrono::milliseconds(30));
                         nextRun = std::chrono::steady_clock::now();
                         continue;
@@ -308,25 +324,20 @@ namespace {
                         continue;
                     }
 
-                    std::vector<CATJ_camera::BallDetection> dets;
+                    std::vector<CATJ_camera::BallDetection> rawDets;
                     const auto t0 = std::chrono::steady_clock::now();
-                    (void)cam.detectBalls(frame, dets);
+                    (void)cam.detectBalls(frame, rawDets);
                     const auto t1 = std::chrono::steady_clock::now();
 
-                    Snapshot snap;
-                    snap.detections = std::move(dets);
-                    snap.frameWidth = frame.cols;
-                    snap.frameHeight = frame.rows;
-                    snap.inferenceMs = static_cast<double>(
-                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000.0;
-                    snap.timestamp = t1;
-                    snap.valid = true;
+                    // Stabilisation : le modèle peut rater une balle pendant 1 ou 2
+                    // inférences à cause des reflets, du mouvement ou d'un seuil limite.
+                    // On garde alors la dernière boîte connue quelques cycles au lieu
+                    // d'effacer immédiatement l'overlay et la cible de navigation.
+                    auto stableDets = stabilizeDetections_(rawDets, t1);
 
-                    {
-                        std::lock_guard<std::mutex> lk(m_);
-                        snap.sequence = latest_.sequence + 1;
-                        latest_ = std::move(snap);
-                    }
+                    const double inferenceMs = static_cast<double>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000.0;
+                    publishSnapshot_(std::move(stableDets), frame.cols, frame.rows, inferenceMs, t1);
 
                     // Cadencement volontaire après la fin de l'inférence.
                     // Si le modèle est plus lent que la consigne, aucune file d'attente
@@ -361,10 +372,142 @@ namespace {
         }
 
     private:
+        struct Track {
+            CATJ_camera::BallDetection det;
+            int missed = 0;
+            std::chrono::steady_clock::time_point lastSeen{};
+            uint64_t id = 0;
+        };
+
+        static float iou_(const cv::Rect& a, const cv::Rect& b)
+        {
+            const int x1 = std::max(a.x, b.x);
+            const int y1 = std::max(a.y, b.y);
+            const int x2 = std::min(a.x + a.width, b.x + b.width);
+            const int y2 = std::min(a.y + a.height, b.y + b.height);
+            const int iw = std::max(0, x2 - x1);
+            const int ih = std::max(0, y2 - y1);
+            const float inter = static_cast<float>(iw * ih);
+            const float uni = static_cast<float>(a.area() + b.area()) - inter;
+            return (uni > 0.0f) ? (inter / uni) : 0.0f;
+        }
+
+        static bool centerCloseEnough_(const cv::Rect& a, const cv::Rect& b)
+        {
+            const float ax = static_cast<float>(a.x) + static_cast<float>(a.width) * 0.5f;
+            const float ay = static_cast<float>(a.y) + static_cast<float>(a.height) * 0.5f;
+            const float bx = static_cast<float>(b.x) + static_cast<float>(b.width) * 0.5f;
+            const float by = static_cast<float>(b.y) + static_cast<float>(b.height) * 0.5f;
+            const float dx = ax - bx;
+            const float dy = ay - by;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            const float ref = static_cast<float>(std::max({ 1, a.width, a.height, b.width, b.height }));
+            return dist <= ref * 0.75f;
+        }
+
+        void clearTracks_()
+        {
+            std::lock_guard<std::mutex> lk(trackMutex_);
+            tracks_.clear();
+        }
+
+        std::vector<CATJ_camera::BallDetection> stabilizeDetections_(
+            const std::vector<CATJ_camera::BallDetection>& raw,
+            std::chrono::steady_clock::time_point now)
+        {
+            std::lock_guard<std::mutex> lk(trackMutex_);
+
+            std::vector<bool> used(tracks_.size(), false);
+
+            for (const auto& d : raw) {
+                int bestIdx = -1;
+                float bestIou = persistence_.matchIou;
+
+                for (size_t i = 0; i < tracks_.size(); ++i) {
+                    if (used[i]) continue;
+                    const float score = iou_(tracks_[i].det.box, d.box);
+                    if (score >= bestIou) {
+                        bestIou = score;
+                        bestIdx = static_cast<int>(i);
+                    }
+                    else if (bestIdx < 0 && centerCloseEnough_(tracks_[i].det.box, d.box)) {
+                        // À faible FPS IA, la balle peut bouger assez pour réduire l'IoU,
+                        // tout en restant clairement la même cible dans l'image.
+                        bestIdx = static_cast<int>(i);
+                    }
+                }
+
+                if (bestIdx >= 0) {
+                    Track& t = tracks_[static_cast<size_t>(bestIdx)];
+                    t.det = d;
+                    t.missed = 0;
+                    t.lastSeen = now;
+                    used[static_cast<size_t>(bestIdx)] = true;
+                }
+                else {
+                    Track t;
+                    t.det = d;
+                    t.missed = 0;
+                    t.lastSeen = now;
+                    t.id = ++nextTrackId_;
+                    tracks_.push_back(t);
+                    used.push_back(true);
+                }
+            }
+
+            for (size_t i = 0; i < tracks_.size(); ++i) {
+                if (i < used.size() && used[i]) continue;
+                tracks_[i].missed += 1;
+            }
+
+            tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(), [&](const Track& t) {
+                const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - t.lastSeen).count();
+                const bool tooManyMisses = t.missed > persistence_.maxMisses;
+                const bool tooOld = persistence_.maxAgeMs > 0 && ageMs > persistence_.maxAgeMs;
+                return tooManyMisses || tooOld;
+            }), tracks_.end());
+
+            std::vector<CATJ_camera::BallDetection> stable;
+            stable.reserve(tracks_.size());
+            for (const auto& t : tracks_) {
+                auto d = t.det;
+                // Légère baisse visuelle/logique après un trou de détection.
+                // Cela permet de distinguer une détection fraîche d'une boîte maintenue.
+                if (t.missed > 0) {
+                    const float decay = std::max(0.45f, 1.0f - 0.12f * static_cast<float>(t.missed));
+                    d.conf *= decay;
+                }
+                stable.push_back(d);
+            }
+            return stable;
+        }
+
+        void publishSnapshot_(std::vector<CATJ_camera::BallDetection> dets,
+            int frameWidth, int frameHeight, double inferenceMs,
+            std::chrono::steady_clock::time_point timestamp)
+        {
+            Snapshot snap;
+            snap.detections = std::move(dets);
+            snap.frameWidth = frameWidth;
+            snap.frameHeight = frameHeight;
+            snap.inferenceMs = inferenceMs;
+            snap.timestamp = timestamp;
+            snap.valid = true;
+
+            std::lock_guard<std::mutex> lk(m_);
+            snap.sequence = latest_.sequence + 1;
+            latest_ = std::move(snap);
+        }
+
         std::atomic<bool> running_{ false };
         std::thread worker_;
         mutable std::mutex m_;
         Snapshot latest_;
+
+        PersistenceConfig persistence_;
+        std::mutex trackMutex_;
+        std::vector<Track> tracks_;
+        uint64_t nextTrackId_ = 0;
     };
 
 
@@ -657,11 +800,16 @@ namespace {
             {"WEB", "vision enabled", "bool", "Vision IA web", "", "", "", true, false},
             {"WEB", "async ai enabled", "bool", "IA asynchrone", "", "", "", false, true},
             {"WEB", "ai stale clear ms", "number", "Durée cache IA web ms", "100", "10000", "50", false, true},
+            {"WEB", "ai persist misses", "number", "Persistance détection web (miss)", "0", "10", "1", false, true},
+            {"WEB", "ai persist ms", "number", "Persistance détection web ms", "0", "3000", "50", false, true},
+            {"WEB", "ai match iou", "number", "Tolérance suivi IA IoU", "0", "1", "0.01", false, true},
             {"WEB", "stream camera", "bool", "Flux caméra web", "", "", "", false, true},
             {"WEB", "video fps", "number", "FPS vidéo web", "1", "30", "1", true, false},
             {"WEB", "jpeg quality", "number", "Qualité JPEG web", "20", "100", "1", true, false},
             {"WEB", "loop sleep ms", "number", "Sleep boucle web", "1", "100", "1", true, false},
-            {"RAMASSAGE", "vision stale max ms", "number", "Durée cache IA ramassage ms", "100", "5000", "50", false, true}
+            {"RAMASSAGE", "vision stale max ms", "number", "Durée cache IA ramassage ms", "100", "5000", "50", false, true},
+            {"RAMASSAGE", "vision persist misses", "number", "Persistance ramassage (miss)", "0", "10", "1", false, true},
+            {"RAMASSAGE", "vision persist ms", "number", "Persistance ramassage ms", "0", "3000", "50", false, true}
         };
 
         auto esc = CATJ_webui_rt::WebUiRtServer::jsonEscape;
@@ -839,6 +987,9 @@ namespace {
         const bool streamCamera = iniFile.getOr("WEB", "stream camera", true);
         const bool visionEnabled = iniFile.getOr("WEB", "vision enabled", (baseMode == CATJ_utility::programme_mode::camera));
         const bool asyncAiEnabled = iniFile.getOr("WEB", "async ai enabled", true);
+        const int webAiPersistMisses = std::clamp(iniFile.getOr("WEB", "ai persist misses", 3), 0, 10);
+        const int webAiPersistMs = std::clamp(iniFile.getOr("WEB", "ai persist ms", 900), 0, 3000);
+        const float webAiMatchIou = std::clamp(iniFile.getOr("WEB", "ai match iou", 0.12f), 0.0f, 1.0f);
 
         // --- LIDAR ---
         const bool lidarEnabled = iniFile.getOr("LIDAR", "enabled", true);
@@ -875,6 +1026,9 @@ namespace {
         std::atomic<int> liveWebLoopSleepMs{ webLoopSleepMs };
         std::atomic<bool> liveVisionEnabled{ visionEnabled };
         std::atomic<int> liveJpegQuality{ jpegQuality };
+        // Fallback HTTP utilisé quand le WebSocket est indisponible.
+        // Le bouton STOP programme appelle /api/program_stop en plus du WS.
+        std::atomic<bool> remoteStopRequested{ false };
         bridge.server().setJpegQuality(jpegQuality);
 
         // --- COMMS (UART / Bluetooth / WiFi / RJ45) ---
@@ -889,6 +1043,65 @@ namespace {
                 std::cout << "[COMMS] Presets chargés: " << commsIni << std::endl;
             }
         }
+
+        // UART carte mere utilise par les commandes manuelles du dashboard.
+        // On se base sur [MOTHERBOARD] pour rester coherent avec le test Python valide
+        // (/dev/serial0 @ 115200 dans ta configuration actuelle).
+        const std::string webBoardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
+        const int webBoardBaud = iniFile.getOr("MOTHERBOARD", "baudrate", 115200);
+        const std::string webBoardSpec = webBoardPort + "@" + std::to_string(webBoardBaud);
+
+        auto sendBoardLineFromWeb = [&](const std::string& line) -> bool {
+            CATJ_comms::SendRequest req;
+            req.transport = CATJ_comms::Transport::Uart;
+            req.deviceSpec = webBoardSpec;
+            req.payload = line;
+            req.encoding = "ascii";
+            req.appendNewline = true;
+
+            CATJ_comms::ReplyOptions ro;
+            ro.expectReply = false;
+            ro.clearRxBeforeSend = false;
+            ro.timeoutMs = 50;
+            ro.maxBytes = 256;
+
+            const auto r = comms.sendEx(req, ro);
+            if (!r.ok) {
+                std::cerr << "[WEB->UART] Echec envoi '" << line << "' vers "
+                          << webBoardSpec << " : " << r.error << std::endl;
+            } else {
+                std::cout << "[WEB->UART] " << line << std::endl;
+            }
+            return r.ok;
+        };
+
+        auto sendBoardDriveFromWeb = [&](int leftPct, int rightPct) {
+            leftPct = std::clamp(leftPct, -100, 100);
+            rightPct = std::clamp(rightPct, -100, 100);
+
+            const int avg = static_cast<int>(std::lround((leftPct + rightPct) / 2.0));
+            const int speed = std::clamp(std::abs(avg), 0, 100);
+            const int turn = std::clamp(static_cast<int>(std::lround((leftPct - rightPct) / 2.0)), -60, 60);
+
+            if (speed == 0 && turn == 0) {
+                sendBoardLineFromWeb("MOVE STOP");
+                sendBoardLineFromWeb("SPEED 0");
+                sendBoardLineFromWeb("TURN 0");
+                return;
+            }
+
+            // Le protocole carte mere actuel est MOVE/SPEED/TURN, pas moteur gauche/droit.
+            // On convertit donc les boutons du dashboard en consignes compatibles.
+            // Pour une rotation pure, on garde une petite vitesse afin que le simulateur Mega
+            // fasse evoluer le cap lorsque TURN est non nul.
+            if (avg < 0) {
+                sendBoardLineFromWeb("MOVE BACKWARD");
+            } else {
+                sendBoardLineFromWeb("MOVE FORWARD");
+            }
+            sendBoardLineFromWeb("SPEED " + std::to_string(std::max(speed, std::abs(turn))));
+            sendBoardLineFromWeb("TURN " + std::to_string(turn));
+        };
 
         // API pour la page Comms (chargement config + historique + scan)
         bridge.server().registerGet("/api/comms_config", [&](const CATJ_webui_rt::HttpRequest&) {
@@ -910,6 +1123,21 @@ namespace {
             r.status = 200;
             r.contentType = "application/json; charset=utf-8";
             r.body = comms.historyJson(limit);
+            return r;
+            });
+
+        bridge.server().registerPost("/api/program_stop", [&](const CATJ_webui_rt::HttpRequest&) {
+            std::cout << "[WEB HTTP] Demande STOP programme reçue via /api/program_stop" << std::endl;
+            remoteStopRequested.store(true);
+            liveVisionEnabled.store(false);
+
+            CATJ_webui_rt::HttpResponse r;
+            r.status = 200;
+            r.contentType = "application/json; charset=utf-8";
+            r.body = "{\"ok\":true,\"message\":\"stop requested\"}";
+
+            // Diffusion best-effort pour les autres onglets déjà connectés.
+            bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"STOP programme demande via HTTP\"}");
             return r;
             });
 
@@ -1003,8 +1231,9 @@ namespace {
                 {"CAMERA", "nombres de prise pour la calibration"},
                 {"IA", "ONNX model path"},
                 {"WEB", "vision enabled"}, {"WEB", "async ai enabled"}, {"WEB", "ai stale clear ms"},
+                {"WEB", "ai persist misses"}, {"WEB", "ai persist ms"}, {"WEB", "ai match iou"},
                 {"WEB", "stream camera"}, {"WEB", "video fps"}, {"WEB", "jpeg quality"}, {"WEB", "loop sleep ms"},
-                {"RAMASSAGE", "vision stale max ms"}
+                {"RAMASSAGE", "vision stale max ms"}, {"RAMASSAGE", "vision persist misses"}, {"RAMASSAGE", "vision persist ms"}
             };
             return std::find(allowed.begin(), allowed.end(), std::make_pair(section, key)) != allowed.end();
         };
@@ -1031,7 +1260,9 @@ namespace {
                 {"CAMERA", "target color"}, {"CAMERA", "ignore color"}, {"CAMERA", "show image"},
                 {"CAMERA", "flag recording"}, {"CAMERA", "undistort enabled"}, {"CAMERA", "hardware focal mm"},
                 {"CAMERA", "square size"}, {"CAMERA", "nombres de prise pour la calibration"},
-                {"WEB", "vision enabled"}, {"WEB", "video fps"}, {"WEB", "jpeg quality"}, {"WEB", "loop sleep ms"}
+                {"WEB", "vision enabled"}, {"WEB", "video fps"}, {"WEB", "jpeg quality"}, {"WEB", "loop sleep ms"},
+                {"WEB", "ai persist misses"}, {"WEB", "ai persist ms"}, {"WEB", "ai match iou"},
+                {"RAMASSAGE", "vision persist misses"}, {"RAMASSAGE", "vision persist ms"}
             };
             for (const auto& k : keys) {
                 updates.push_back({ k.first, k.second, iniReadRawValue_(configIniPath, k.first, k.second, "") });
@@ -1487,7 +1718,9 @@ namespace {
             << " jpeg_quality=" << liveJpegQuality.load()
             << " loop_sleep_ms=" << liveWebLoopSleepMs.load()
             << " ai_fps=" << cam.getAiFps()
-            << " async_ai=" << (asyncAiEnabled ? "ON" : "OFF") << std::endl;
+            << " async_ai=" << (asyncAiEnabled ? "ON" : "OFF")
+            << " persist_misses=" << webAiPersistMisses
+            << " persist_ms=" << webAiPersistMs << std::endl;
 
         bool shouldQuit = false;
 
@@ -1498,10 +1731,14 @@ namespace {
         uint64_t lastAiSeqSeen = 0;
         const int aiStaleClearMs = std::clamp(iniFile.getOr("WEB", "ai stale clear ms", 1200), 100, 10000);
         if (asyncAiEnabled && streamCamera && camOk) {
-            aiDetector.start(cam, &liveVisionEnabled);
+            AsyncBallDetector_::PersistenceConfig pc;
+            pc.maxMisses = webAiPersistMisses;
+            pc.maxAgeMs = webAiPersistMs;
+            pc.matchIou = webAiMatchIou;
+            aiDetector.start(cam, &liveVisionEnabled, pc);
         }
 
-        while (bridge.isRunning() && !shouldQuit)
+        while (bridge.isRunning() && !shouldQuit && !remoteStopRequested.load())
         {
             CATJ_robot_web::ControlEvent ev;
             while (bridge.popControlEvent(ev))
@@ -1523,6 +1760,7 @@ namespace {
                 case CATJ_robot_web::ControlEventType::SetThrusters:
                     manualLeftPct = ev.valueA;
                     manualRightPct = ev.valueB;
+                    sendBoardDriveFromWeb(manualLeftPct, manualRightPct);
                     break;
 
                 case CATJ_robot_web::ControlEventType::SetConveyor:
@@ -1564,6 +1802,7 @@ namespace {
                     manualLeftPct = 0;
                     manualRightPct = 0;
                     manualConveyorPct = 0;
+                    sendBoardDriveFromWeb(0, 0);
                     break;
 
                 case CATJ_robot_web::ControlEventType::DrivePreset:
@@ -1583,6 +1822,7 @@ namespace {
                         manualLeftPct = 25;
                         manualRightPct = -25;
                     }
+                    sendBoardDriveFromWeb(manualLeftPct, manualRightPct);
                     break;
 
 
@@ -1622,7 +1862,7 @@ namespace {
                     std::string encoding = getS("encoding");
                     if (encoding.empty()) encoding = "ascii";
                     for (auto& c : encoding) c = (char)std::tolower((unsigned char)c);
-                    const bool appendNl = getB("append_nl", false);
+                    const bool appendNl = getB("append_nl", true);
 
                     CATJ_comms::SendRequest req;
                     req.deviceSpec = device;
@@ -1645,6 +1885,13 @@ namespace {
                     ro.timeoutMs = std::clamp(getI("timeout_ms", 250), 10, 5000);
                     ro.maxBytes = (size_t)std::clamp(getI("max_bytes", 512), 16, 8192);
                     ro.clearRxBeforeSend = getB("clear_rx", true);
+
+                    std::cout << "[COMMS SEND] transport=" << transport
+                              << " device=" << device
+                              << " payload='" << payload << "'"
+                              << " append_nl=" << (appendNl ? "true" : "false")
+                              << " expect_reply=" << (ro.expectReply ? "true" : "false")
+                              << std::endl;
 
                     auto r = comms.sendEx(req, ro);
                     if (!r.ok) {
@@ -1669,6 +1916,8 @@ namespace {
                 }
                 case CATJ_robot_web::ControlEventType::quitProgram:
                     std::cout << "ControlEventType : quitProgram" << std::endl;
+                    liveVisionEnabled.store(false);
+                    remoteStopRequested.store(true);
                     shouldQuit = true;
                     break;
 
@@ -1869,6 +2118,9 @@ namespace {
             std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(liveWebLoopSleepMs.load(), 1, 100)));
         }
 
+        if (remoteStopRequested.load()) {
+            std::cout << "Arrêt du programme demandé depuis l'interface web." << std::endl;
+        }
         std::cout << "Arrêt du programme..." << std::endl;
 
         aiDetector.stop();
@@ -1951,6 +2203,8 @@ namespace {
         // Le pilotage autonome ne doit pas attendre l'inférence IA.
         // Cette durée définit pendant combien de temps on accepte le dernier résultat IA.
         const int visionStaleMaxMs = std::clamp(iniFile.getOr("RAMASSAGE", "vision stale max ms", 700), 100, 5000);
+        const int visionPersistMisses = std::clamp(iniFile.getOr("RAMASSAGE", "vision persist misses", 2), 0, 10);
+        const int visionPersistMs = std::clamp(iniFile.getOr("RAMASSAGE", "vision persist ms", 700), 0, 3000);
 
         const bool boardEnabled = iniFile.getOr("MOTHERBOARD", "enabled", true);
         const std::string boardPort = iniFile.getOr<std::string>("MOTHERBOARD", "port", "/dev/serial0");
@@ -2088,7 +2342,11 @@ namespace {
         // navigation reste disponible pour l'UART, le LiDAR et les commandes moteurs.
         std::atomic<bool> ramVisionEnabled{ true };
         AsyncBallDetector_ ramAiDetector;
-        ramAiDetector.start(cam, &ramVisionEnabled);
+        AsyncBallDetector_::PersistenceConfig ramPc;
+        ramPc.maxMisses = visionPersistMisses;
+        ramPc.maxAgeMs = visionPersistMs;
+        ramPc.matchIou = 0.12f;
+        ramAiDetector.start(cam, &ramVisionEnabled, ramPc);
         uint64_t lastRamVisionSeq = 0;
         std::vector<CATJ_robot::RobotBall> cachedRobotBalls;
 
@@ -2590,7 +2848,7 @@ namespace {
 
         board.sendHeartbeat();
         board.sendMode(CATJ_robot::RobotMode::Course);
-        board.sendObjective(0);
+        // Pas d'OBJECTIF/SCORE en mode course : cette epreuve ne concerne pas le ramassage.
         board.sendStopAll();
 
         std::cout << "Mode COURSE autonome (demi-tour autour d'une balise)" << std::endl;
@@ -2630,7 +2888,9 @@ namespace {
 
             while (auto status = board.readStatusOnce(1)) {
                 updateHeadingFromStatus_(*status, lastHeadingDeg);
-                if (!status->rawLine.empty()) {
+                const bool collectionStatus = status->scoreValid || status->scoreDeltaValid
+                    || status->balle != CATJ_robot::BallKind::Unknown;
+                if (!collectionStatus && !status->rawLine.empty()) {
                     std::cout << "[MB] " << status->rawLine << std::endl;
                 }
             }

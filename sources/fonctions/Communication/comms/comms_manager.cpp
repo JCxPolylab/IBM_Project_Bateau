@@ -794,6 +794,13 @@ SendResult CommsManager::sendEx(const SendRequest& req, const ReplyOptions& ro)
                 res.error = "bad uart spec";
                 return res;
             }
+#if !defined(_WIN32)
+            if ((port == "/dev/serial0" || port == "/dev/ttyS0") && baud != 115200) {
+                res.ok = false;
+                res.error = "/dev/serial0 must be opened at 115200 bauds for motherboard UART";
+                return res;
+            }
+#endif
             const std::string key = port + "@" + std::to_string(baud);
 
             CATJ_uart::Uart* link = nullptr;

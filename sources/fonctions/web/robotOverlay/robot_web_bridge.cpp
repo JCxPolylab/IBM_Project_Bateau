@@ -630,6 +630,17 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         if (out.name == "brightRange") telemetry_.camera.brightness = out.valueA;
         if (out.name == "contrastRange") telemetry_.camera.contrast = out.valueA;
     }
+    else if (ev.action == "comms_scan")
+    {
+        out.type = ControlEventType::CommsScan;
+        out.name = "comms_scan";
+    }
+    else if (ev.action == "comms_send")
+    {
+        out.type = ControlEventType::CommsSend;
+        out.name = "comms_send";
+        out.value = ev.fields.count("payload") ? ev.fields.at("payload") : "";
+    }
     else if (ev.action == "programme")
     {
         std::cout << "action : " << ev.action << std::endl;
