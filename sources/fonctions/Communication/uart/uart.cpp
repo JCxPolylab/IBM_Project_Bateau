@@ -212,6 +212,18 @@ namespace CATJ_uart {
         if (spd == 0)
             return false;
 
+        // Mode brut 8N1 stable.
+        // IMPORTANT : ICANON/ECHO/ECHOE/ISIG appartiennent a c_lflag, pas a c_cflag.
+        // Les effacer dans c_cflag corrompt les bits de vitesse et de taille de mot
+        // sous Linux (ex: B115200 et CS8), ce qui produit des trames illisibles.
+#ifdef __linux__
+        cfmakeraw(&tty);
+#else
+        tty.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON | IXOFF | IXANY);
+        tty.c_oflag &= ~OPOST;
+        tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+#endif
+
         cfsetospeed(&tty, spd);
         cfsetispeed(&tty, spd);
 
@@ -227,9 +239,9 @@ namespace CATJ_uart {
         }
 
         tty.c_cflag |= CLOCAL | CREAD;
-        tty.c_cflag &= ~(ICANON | ECHO | ECHOE | ISIG);
         tty.c_iflag &= ~(IXON | IXOFF | IXANY);
         tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
+        tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
         tty.c_oflag &= ~OPOST;
 
         if (cfg_.parity == Parity::None) {
