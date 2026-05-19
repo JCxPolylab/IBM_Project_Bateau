@@ -43,6 +43,51 @@ std::string recordingPath;
 
 namespace {
 
+    std::string sanitizeExtension_(std::string ext, const std::string& fallback)
+    {
+        ext.erase(std::remove_if(ext.begin(), ext.end(), [](unsigned char c) {
+            return std::isspace(c) || c == '.';
+        }), ext.end());
+        return ext.empty() ? fallback : ext;
+    }
+
+    std::string makeRecordingFilePath_(const std::filesystem::path& projectRoot,
+        const std::string& recordingDirRaw,
+        const std::string& videoExtRaw)
+    {
+        CATJ_utility::MyString ts;
+        ts.fromStdString(CATJ_utility::now_timestamp());
+        ts.trim();
+
+        const std::string ext = sanitizeExtension_(videoExtRaw, "avi");
+        std::filesystem::path recDir = recordingDirRaw.empty()
+            ? (projectRoot / "recordings")
+            : (projectRoot / recordingDirRaw);
+
+        std::error_code ec;
+        std::filesystem::create_directories(recDir, ec);
+
+        return (recDir / (std::string("recording_") + ts.toStdString() + "." + ext)).string();
+    }
+
+    std::string makeSnapshotFilePath_(const std::filesystem::path& projectRoot,
+        const std::string& recordingDirRaw)
+    {
+        CATJ_utility::MyString ts;
+        ts.fromStdString(CATJ_utility::now_timestamp());
+        ts.trim();
+
+        std::filesystem::path recDir = recordingDirRaw.empty()
+            ? (projectRoot / "recordings")
+            : (projectRoot / recordingDirRaw);
+
+        std::error_code ec;
+        std::filesystem::create_directories(recDir, ec);
+
+        return (recDir / (std::string("snapshot_") + ts.toStdString() + ".jpg")).string();
+    }
+
+
     std::string ballColorToLabel(CATJ_camera::BallColor c)
     {
         switch (c) {
@@ -1794,6 +1839,61 @@ namespace {
                     }
                     break;
 
+                case CATJ_robot_web::ControlEventType::CameraRecord: {
+                    const std::string recDirRaw = iniFile.getOr<std::string>("CAMERA", "recording file path", "");
+                    const std::string videoExtRaw = iniFile.getOr<std::string>("CAMERA", "video ext", "avi");
+
+                    if (ev.name == "start") {
+                        if (cam.getRecording()) {
+                            bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"Recording already running\"}");
+                            break;
+                        }
+
+                        const std::string newRecordingPath = makeRecordingFilePath_(prjPath, recDirRaw, videoExtRaw);
+                        if (cam.startRecording(newRecordingPath, cam.getFps(), codec)) {
+                            recordingPath = newRecordingPath;
+                            const auto escapedPath = CATJ_webui_rt::WebUiRtServer::jsonEscape(newRecordingPath);
+                            std::cout << "[CAMERA] Recording START: " << newRecordingPath << std::endl;
+                            bridge.server().broadcastText(std::string("{\"type\":\"info\",\"message\":\"Recording started: ")
+                                + escapedPath + "\"}");
+                        } else {
+                            std::cerr << "[CAMERA] Recording START failed" << std::endl;
+                            bridge.server().broadcastText("{\"type\":\"error\",\"message\":\"Recording start failed: camera not ready or codec invalid\"}");
+                        }
+                    }
+                    else if (ev.name == "stop") {
+                        if (!cam.getRecording()) {
+                            bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"Recording already stopped\"}");
+                            break;
+                        }
+
+                        cam.stopRecording();
+                        std::cout << "[CAMERA] Recording STOP: " << recordingPath << std::endl;
+                        bridge.server().broadcastText("{\"type\":\"info\",\"message\":\"Recording stopped\"}");
+                    }
+                    else if (ev.name == "snapshot") {
+                        cv::Mat frame;
+                        if (!cam.getLatestFrame(frame) || frame.empty()) {
+                            bridge.server().broadcastText("{\"type\":\"error\",\"message\":\"Snapshot failed: no camera frame available\"}");
+                            break;
+                        }
+
+                        const std::string snapshotPath = makeSnapshotFilePath_(prjPath, recDirRaw);
+                        if (cv::imwrite(snapshotPath, frame)) {
+                            const auto escapedPath = CATJ_webui_rt::WebUiRtServer::jsonEscape(snapshotPath);
+                            std::cout << "[CAMERA] Snapshot saved: " << snapshotPath << std::endl;
+                            bridge.server().broadcastText(std::string("{\"type\":\"info\",\"message\":\"Snapshot saved: ")
+                                + escapedPath + "\"}");
+                        } else {
+                            bridge.server().broadcastText("{\"type\":\"error\",\"message\":\"Snapshot failed: cannot write file\"}");
+                        }
+                    }
+                    else {
+                        std::cout << "[CAMERA] Unknown recording command: " << ev.name << std::endl;
+                    }
+                    break;
+                }
+
                 case CATJ_robot_web::ControlEventType::ToggleOverlay:
                     std::cout << "Overlay: " << (ev.valueA ? "ON" : "OFF") << std::endl;
                     break;
@@ -2829,6 +2929,10 @@ namespace {
         modeCfg.speedBackupPct = iniFile.getOr("COURSE", "speed backup pct", modeCfg.speedBackupPct);
         modeCfg.speedSearchPct = iniFile.getOr("COURSE", "speed search pct", modeCfg.speedSearchPct);
         modeCfg.clockwiseTurn = iniFile.getOr("COURSE", "clockwise turn", modeCfg.clockwiseTurn);
+        modeCfg.autoTurnSide = iniFile.getOr("COURSE", "auto turn side", modeCfg.autoTurnSide);
+        modeCfg.autoTurnSideMinDeltaMm = iniFile.getOr("COURSE", "auto turn side min delta mm", modeCfg.autoTurnSideMinDeltaMm);
+        modeCfg.blindTurnFallback = iniFile.getOr("COURSE", "blind turn fallback", modeCfg.blindTurnFallback);
+        modeCfg.markerConfirmCycles = iniFile.getOr("COURSE", "marker confirm cycles", modeCfg.markerConfirmCycles);
         modeCfg.useGyroHeading = iniFile.getOr("COURSE", "use gyro heading", modeCfg.useGyroHeading);
         modeCfg.headingKp = iniFile.getOr("COURSE", "heading kp", modeCfg.headingKp);
         modeCfg.maxHeadingCorrectionDeg = iniFile.getOr("COURSE", "max heading correction deg", modeCfg.maxHeadingCorrectionDeg);
@@ -3152,14 +3256,8 @@ int main()
 
     const int aiFps = std::clamp(cam.getAiFps() > 0 ? cam.getAiFps() : 6, 1, 30);
 
-    std::cout << "Initialisation du timestamp pour le nom de fichier d'enregistrement" << std::endl;
-    trimTime.fromStdString(CATJ_utility::now_timestamp());
-    trimTime.trim();
-
     std::cout << "Initialisation du nom de fichier d'enregistrement" << std::endl;
-    const std::filesystem::path recDir = prjPath / str;
-    const std::filesystem::path recFile = std::string("recording_") + trimTime + "." + imgExt;
-    recordingPath = (recDir / recFile).string();
+    recordingPath = makeRecordingFilePath_(prjPath, str, imgExt);
 
     std::cout << "Enregistrement vidéo : " << (flagRecording ? ("ON, path: " + recordingPath) : "OFF") << std::endl;
 

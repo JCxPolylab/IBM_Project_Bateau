@@ -1130,6 +1130,9 @@
   bind('btnAutoMode', 'click', () => sendWs({ type: 'command', action: 'mode_set', mode: 'auto' }));
   bind('btnOverlayOn', 'click', () => sendWs({ type: 'command', action: 'overlay_toggle', enabled: true }));
   bind('btnOverlayOff', 'click', () => sendWs({ type: 'command', action: 'overlay_toggle', enabled: false }));
+  bind('btnCamSnapshot', 'click', () => sendWs({ type: 'command', action: 'camera_record', cmd: 'snapshot' }));
+  bind('btnCamRecord', 'click', () => sendWs({ type: 'command', action: 'camera_record', cmd: 'start' }));
+  bind('btnCamStopRecord', 'click', () => sendWs({ type: 'command', action: 'camera_record', cmd: 'stop' }));
 
   bind('btnForward', 'click', () => {
     if (!ui.leftThruster || !ui.rightThruster) return;

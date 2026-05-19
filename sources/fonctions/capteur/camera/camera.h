@@ -194,6 +194,7 @@ namespace CATJ_camera {
 
         cv::VideoCapture cap_;
         cv::VideoWriter writer_;
+        mutable std::mutex writerMutex_;
         cv::dnn::Net net_;
         // Protège la session IA (ORT/OpenCV DNN). La capture caméra a son propre mutex,
         // mais l'inférence ne doit pas pouvoir être lancée simultanément depuis

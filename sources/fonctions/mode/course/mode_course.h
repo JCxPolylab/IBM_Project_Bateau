@@ -103,6 +103,14 @@ namespace CATJ_robot {
             int speedBackupPct = 18;
             int speedSearchPct = 24;
             bool clockwiseTurn = true;
+            // Si true, le robot choisit automatiquement le sens de contournement
+            // de la balise en fonction du cote le plus degage au LiDAR.
+            bool autoTurnSide = true;
+            float autoTurnSideMinDeltaMm = 180.0f;
+            // Si false, l'absence de balise n'autorise pas un demi-tour aveugle :
+            // le robot continue une recherche lente en S au lieu de lancer ArcAround.
+            bool blindTurnFallback = false;
+            int markerConfirmCycles = 2;
             bool useGyroHeading = true;
             float headingKp = 0.45f;
             float maxHeadingCorrectionDeg = 18.0f;
@@ -148,6 +156,7 @@ namespace CATJ_robot {
         void registerContact_(const CourseLidarDirections& d);
         void setMotion_(MotherboardLink& board, MoveCommand move, int speedPct, float turnDeg);
         void transitionTo_(State next, MotherboardLink& board);
+        void chooseTurnSide_(const CourseLidarDirections& d);
         float headingCorrection_(float headingDeg, float targetDeg) const;
         static float normalizeAngleDeg_(float angleDeg);
         static bool isFinitePositive_(float v);
@@ -159,7 +168,9 @@ namespace CATJ_robot {
         bool homeSeen_ = false;
         int contacts_ = 0;
         int homeSeenCount_ = 0;
+        int markerSeenCount_ = 0;
         int searchTurnSign_ = 1;
+        bool activeClockwise_ = true;
         bool startHeadingValid_ = false;
         float startHeadingDeg_ = 0.0f;
         State state_ = State::Idle;

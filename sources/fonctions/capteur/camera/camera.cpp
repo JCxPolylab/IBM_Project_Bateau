@@ -231,8 +231,11 @@ void Camera::captureLoop_()
             (view.empty() ? frame : view).copyTo(latest_);
         }
 
-        if (recording_ && writer_.isOpened()) {
-            writer_.write(view.empty() ? frame : view);
+        if (recording_) {
+            std::lock_guard<std::mutex> wlk(writerMutex_);
+            if (writer_.isOpened()) {
+                writer_.write(view.empty() ? frame : view);
+            }
         }
 
         const auto dtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -262,27 +265,43 @@ bool Camera::startRecording(const std::string& filename, double fps, const std::
 {
     if (!isOpen()) return false;
 
-    // Il faut déjà avoir une frame donc startCapture AVANT startRecording
     cv::Mat f;
-    cap_ >> f;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (!latest_.empty()) {
+            latest_.copyTo(f);
+        }
+    }
+
+    // Si le thread de capture n'a pas encore publié de frame, on tente une lecture directe.
+    // En fonctionnement normal, latest_ évite de lire cap_ en concurrence avec captureLoop_.
+    if (f.empty() && !running_) {
+        cap_ >> f;
+    }
+
     if (f.empty()) {
         std::cerr << "startRecording: frame vide (camera pas prête)\n";
         return false;
     }
 
-    // fourcc doit faire 4 chars
     std::string cc = fourcc;
     if (cc.size() != 4) {
         std::cerr << "startRecording: FOURCC invalide '" << cc << "' (attendu 4 chars)\n";
         return false;
     }
 
-    int four = cv::VideoWriter::fourcc(cc[0], cc[1], cc[2], cc[3]);
+    const double safeFps = std::max(1.0, fps);
+    const int four = cv::VideoWriter::fourcc(cc[0], cc[1], cc[2], cc[3]);
 
     std::cout << "Starting recording to " << filename
-        << " at " << fps << " FPS with codec " << cc << "\n";
+        << " at " << safeFps << " FPS with codec " << cc << "\n";
 
-    bool ok = writer_.open(filename, four, fps, cv::Size(f.cols, f.rows), true);
+    std::lock_guard<std::mutex> wlk(writerMutex_);
+    if (writer_.isOpened()) {
+        writer_.release();
+    }
+
+    const bool ok = writer_.open(filename, four, safeFps, cv::Size(f.cols, f.rows), true);
 
     if (!ok) {
         std::cerr << "VideoWriter non ouvert (codec/format)\n";
@@ -416,6 +435,7 @@ bool Camera::undistordFrame_(const cv::Mat& in, cv::Mat& out)
 
 void Camera::stopRecording() {
     recording_ = false;
+    std::lock_guard<std::mutex> wlk(writerMutex_);
     if (writer_.isOpened()) writer_.release();
 }
 

@@ -194,7 +194,9 @@ namespace CATJ_robot {
         homeSeen_ = false;
         contacts_ = 0;
         homeSeenCount_ = 0;
+        markerSeenCount_ = 0;
         searchTurnSign_ = 1;
+        activeClockwise_ = cfg_.clockwiseTurn;
         startHeadingValid_ = false;
         startHeadingDeg_ = 0.0f;
         state_ = State::StraightOut;
@@ -257,12 +259,45 @@ namespace CATJ_robot {
         stateTs_ = std::chrono::steady_clock::now();
         homeSeenCount_ = 0;
 
+        if (next == State::ArcAround) {
+            markerSeen_ = true;
+        }
+
         if (next == State::Finish) {
             courseComplete_ = true;
             homeSeen_ = true;
             setMotion_(board, MoveCommand::Stop, 0, 0.0f);
             board.sendStopAll();
             running_ = false;
+        }
+    }
+
+    void ModeCourseDemiTour::chooseTurnSide_(const CourseLidarDirections& d)
+    {
+        activeClockwise_ = cfg_.clockwiseTurn;
+        if (!cfg_.autoTurnSide) {
+            return;
+        }
+
+        const bool leftOk = isFinitePositive_(d.leftMm);
+        const bool rightOk = isFinitePositive_(d.rightMm);
+        if (!leftOk && !rightOk) {
+            return;
+        }
+        if (leftOk && !rightOk) {
+            activeClockwise_ = false;
+            return;
+        }
+        if (!leftOk && rightOk) {
+            activeClockwise_ = true;
+            return;
+        }
+
+        const float diff = d.rightMm - d.leftMm;
+        if (std::fabs(diff) >= cfg_.autoTurnSideMinDeltaMm) {
+            // Sens horaire => contournement par la droite. On privilegie le cote
+            // ou le LiDAR voit le plus d'espace disponible.
+            activeClockwise_ = (diff > 0.0f);
         }
     }
 
@@ -297,19 +332,33 @@ namespace CATJ_robot {
         const double elapsed = elapsedSec();
         const double stateElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - stateTs_).count() / 1000.0;
 
-        const bool markerAhead = isFinitePositive_(d.frontMm) && d.frontMm <= cfg_.markerApproachMm;
+        const bool markerCandidate = isFinitePositive_(d.frontMm) && d.frontMm <= cfg_.markerApproachMm;
         const bool markerVeryClose = isFinitePositive_(d.frontMm) && d.frontMm <= cfg_.markerTooCloseMm;
+
+        if (state_ == State::StraightOut) {
+            if (markerCandidate) {
+                markerSeenCount_ = std::min(markerSeenCount_ + 1, std::max(1, cfg_.markerConfirmCycles));
+            }
+            else {
+                markerSeenCount_ = 0;
+            }
+        }
+
+        const bool markerConfirmed = markerSeenCount_ >= std::max(1, cfg_.markerConfirmCycles);
 
         switch (state_) {
         case State::StraightOut:
         {
-            if (markerAhead) {
+            if (markerConfirmed) {
                 markerSeen_ = true;
+
                 if (markerVeryClose) {
+                    chooseTurnSide_(d);
                     transitionTo_(State::BackupClear, board);
                     break;
                 }
                 if (isFinitePositive_(d.frontMm) && d.frontMm <= cfg_.markerCaptureMm) {
+                    chooseTurnSide_(d);
                     transitionTo_(State::ArcAround, board);
                     break;
                 }
@@ -319,7 +368,18 @@ namespace CATJ_robot {
             }
 
             if (elapsed >= cfg_.fallbackMarkerSec) {
-                transitionTo_(State::ArcAround, board);
+                if (cfg_.blindTurnFallback) {
+                    chooseTurnSide_(d);
+                    transitionTo_(State::ArcAround, board);
+                    break;
+                }
+
+                if (now - lastSearchFlipTs_ >= cfg_.searchFlipPeriod) {
+                    searchTurnSign_ = -searchTurnSign_;
+                    lastSearchFlipTs_ = now;
+                }
+                setMotion_(board, MoveCommand::Forward, cfg_.speedSearchPct,
+                    static_cast<float>(searchTurnSign_) * cfg_.searchTurnDeg);
                 break;
             }
 
@@ -347,8 +407,8 @@ namespace CATJ_robot {
 
         case State::ArcAround:
         {
-            const float baseTurn = cfg_.clockwiseTurn ? +cfg_.arcTurnDeg : -cfg_.arcTurnDeg;
-            const float tightTurn = cfg_.clockwiseTurn ? +cfg_.arcTightTurnDeg : -cfg_.arcTightTurnDeg;
+            const float baseTurn = activeClockwise_ ? +cfg_.arcTurnDeg : -cfg_.arcTurnDeg;
+            const float tightTurn = activeClockwise_ ? +cfg_.arcTightTurnDeg : -cfg_.arcTightTurnDeg;
             const float commandedTurn = markerVeryClose ? tightTurn : baseTurn;
             setMotion_(board, MoveCommand::Forward, cfg_.speedArcPct, commandedTurn);
 
@@ -360,7 +420,7 @@ namespace CATJ_robot {
 
         case State::CounterSteer:
         {
-            const float counterTurn = cfg_.clockwiseTurn ? -cfg_.counterTurnDeg : +cfg_.counterTurnDeg;
+            const float counterTurn = activeClockwise_ ? -cfg_.counterTurnDeg : +cfg_.counterTurnDeg;
             setMotion_(board, MoveCommand::Forward, cfg_.speedCounterPct, counterTurn);
             if (cfg_.useGyroHeading && startHeadingValid_ && headingDeg) {
                 const float returnHeading = normalizeAngleDeg_(startHeadingDeg_ + 180.0f);

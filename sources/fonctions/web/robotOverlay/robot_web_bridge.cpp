@@ -630,6 +630,11 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
         if (out.name == "brightRange") telemetry_.camera.brightness = out.valueA;
         if (out.name == "contrastRange") telemetry_.camera.contrast = out.valueA;
     }
+    else if (ev.action == "camera_record") {
+        const std::string cmd = ev.fields.count("cmd") ? trimLowerCopy(ev.fields.at("cmd")) : "";
+        out.type = ControlEventType::CameraRecord;
+        out.name = cmd;
+    }
     else if (ev.action == "comms_scan")
     {
         out.type = ControlEventType::CommsScan;
@@ -661,6 +666,21 @@ void RobotWebBridge::handleWebCommand_(const CATJ_webui_rt::WebCommandEvent& ev)
             out.type = ControlEventType::CameraSetting;
             out.name = "calibration";
 			std::cout << "Camera calibration requested" << std::endl;
+        }
+        else if (cmd == "start_recording" || cmd == "start_record" || cmd == "record_start" || cmd == "start")
+        {
+            out.type = ControlEventType::CameraRecord;
+            out.name = "start";
+        }
+        else if (cmd == "stop_recording" || cmd == "stop_record" || cmd == "record_stop" || cmd == "stop")
+        {
+            out.type = ControlEventType::CameraRecord;
+            out.name = "stop";
+        }
+        else if (cmd == "snapshot")
+        {
+            out.type = ControlEventType::CameraRecord;
+            out.name = "snapshot";
         }
     }
     else {

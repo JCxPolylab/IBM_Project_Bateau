@@ -117,6 +117,7 @@ enum class ControlEventType {
     CameraStep,
     CameraCenter,
     CameraSetting,
+    CameraRecord,
     ToggleOverlay,
     StopAll,
     DrivePreset,
